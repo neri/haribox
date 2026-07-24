@@ -1,0 +1,11 @@
+[package]
+name = "ume86"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ir86 = { path = "./lib/ir86" }
+paste = { version = "1.0" }
+
+[workspace]
+members = ["examples/disasm"]

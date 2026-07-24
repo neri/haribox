@@ -1,0 +1,9 @@
+[package]
+name = "disasm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ir86 = { path = "../../lib/ir86" }
+elf = { path = "../../lib/elf" }
+hrb = { path = "../../lib/hrb" }
