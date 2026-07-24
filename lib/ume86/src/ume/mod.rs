@@ -192,13 +192,21 @@ impl UME {
         self.state.eip().write(candiates.0.0);
     }
 
+    /// Adjusts the state after an exception occurs
+    #[inline]
+    pub fn adjust_after_exception(&mut self) {
+        self.reflect_eip();
+        self.state.compute_flags();
+    }
+
     /// Executes the emulation
     pub fn execute(&mut self) -> Result<(), Exception> {
         let mut remaining = self.remaining_steps;
         loop {
-            match self.step() {
+            match self._step() {
                 Ok(_) => {}
                 Err(v) => {
+                    self.adjust_after_exception();
                     self.remaining_steps = remaining;
                     return Err(v);
                 }
@@ -216,9 +224,8 @@ impl UME {
         match self._step() {
             Ok(_) => Ok(()),
             Err(v) => {
-                // Adjust internal states
-                self.reflect_eip();
-                self.state.compute_flags();
+                self.adjust_after_exception();
+
                 Err(v)
             }
         }
@@ -306,7 +313,7 @@ impl UME {
     /// Executes a single step of the emulation
     fn _step(&mut self) -> Result<(), Exception> {
         loop {
-            let uop = match self.tracer.peek_uop() {
+            let uop = match self.tracer.fetch_uop() {
                 Some(uop) => uop,
                 None => return Err(Exception::OutOfCode),
             };
@@ -706,13 +713,6 @@ impl UME {
                     self.alu().and32(dst, src);
                 }
 
-                Uop::MulR(rd) => {
-                    let dst = self.state.runtime(rd).e().read();
-                    let eax = self.state.eax().read();
-                    let result = self.alu().mul32(eax, dst);
-                    self.state.eax().write(result as u32);
-                    self.state.edx().write((result >> 32) as u32);
-                }
                 Uop::IMulR(rd, rs) => {
                     let dst = self.state.runtime(rd).e().read() as i32;
                     let src = self.state.runtime(rs).e().read() as i32;
@@ -877,7 +877,7 @@ impl UME {
                     return Err(Exception::Swi(ib));
                 }
 
-                // Invalid for now
+                // Invalid for here
                 Uop::FetchNext(_) => return Err(Exception::Unimplemented(uop)),
 
                 Uop::Minor(mop) => match mop {
@@ -886,7 +886,7 @@ impl UME {
                         self.state.edx().write(if eax < 0 { u32::MAX } else { 0 });
                     }
                     UopMinor::Cld => {
-                        self.state_mut().flags_mut().clear(Flags::DF);
+                        self.state_mut().flags_mut().set_static(Flags::DF, false);
                     }
                     UopMinor::Cpuid => {
                         let eax = self.state.eax().read();
@@ -896,6 +896,13 @@ impl UME {
                         self.state.ebx().write(cpuid_result.ebx);
                         self.state.ecx().write(cpuid_result.ecx);
                         self.state.edx().write(cpuid_result.edx);
+                    }
+                    UopMinor::MulR(rd) => {
+                        let dst = self.state.runtime(rd).e().read();
+                        let eax = self.state.eax().read();
+                        let result = self.alu().mul32(eax, dst);
+                        self.state.eax().write(result as u32);
+                        self.state.edx().write((result >> 32) as u32);
                     }
                     UopMinor::RdTsc => {
                         return Err(Exception::RdTsc);
@@ -958,14 +965,12 @@ pub fn cpuid(eax: u32, _ecx: u32) -> Cpuid {
     };
 
     #[rustfmt::skip]
-    //                                       123456789ABC
+    //                                       |--+---+---|
     const MANUFACTURER_STRING: &[u8; 12] = b"GenuineNerry";
 
     #[rustfmt::skip]
-    //                                         111111111122222222223333333333444444444
-    //                                123456789012345678901234567890123456789012345678
+    //                                |--+---+---+---*---+---+---+---*---+---+---+---|
     const BRAND_STRING: &[u8; 48] = b"An x86 User Mode Emulator @ 1.00GHz             ";
-    // const BRAND_STRING: &[u8; 48] = b"User Mode Emulator x86 CPU @ 1.00GHz            ";
 
     let family = 4;
     let model = 0;

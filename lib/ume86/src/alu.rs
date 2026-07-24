@@ -135,42 +135,42 @@ impl Alu<'_> {
 
     pub fn mul8(&mut self, dst: u8, src: u8) -> u16 {
         let result = (dst as u16).wrapping_mul(src as u16);
-        self.0.flags_mut().unresolve(Flags::CF | Flags::OF);
+        self.0.flags_mut().discard(Flags::CF | Flags::OF);
         *self.0.lazy_op_mut() = LazyOp::Mul8(dst, src);
         result
     }
 
     pub fn mul16(&mut self, dst: u16, src: u16) -> u32 {
         let result = (dst as u32).wrapping_mul(src as u32);
-        self.0.flags_mut().unresolve(Flags::CF | Flags::OF);
+        self.0.flags_mut().discard(Flags::CF | Flags::OF);
         *self.0.lazy_op_mut() = LazyOp::Mul16(dst, src);
         result
     }
 
     pub fn mul32(&mut self, dst: u32, src: u32) -> u64 {
         let result = (dst as u64).wrapping_mul(src as u64);
-        self.0.flags_mut().unresolve(Flags::CF | Flags::OF);
+        self.0.flags_mut().discard(Flags::CF | Flags::OF);
         *self.0.lazy_op_mut() = LazyOp::Mul32(dst, src);
         result
     }
 
     pub fn imul8(&mut self, dst: i8, src: i8) -> i8 {
         let result = dst.wrapping_mul(src);
-        self.0.flags_mut().unresolve(Flags::CF | Flags::OF);
+        self.0.flags_mut().discard(Flags::CF | Flags::OF);
         *self.0.lazy_op_mut() = LazyOp::IMul8(dst, src);
         result
     }
 
     pub fn imul16(&mut self, dst: i16, src: i16) -> i16 {
         let result = dst.wrapping_mul(src);
-        self.0.flags_mut().unresolve(Flags::CF | Flags::OF);
+        self.0.flags_mut().discard(Flags::CF | Flags::OF);
         *self.0.lazy_op_mut() = LazyOp::IMul16(dst, src);
         result
     }
 
     pub fn imul32(&mut self, dst: i32, src: i32) -> i32 {
         let result = dst.wrapping_mul(src);
-        self.0.flags_mut().unresolve(Flags::CF | Flags::OF);
+        self.0.flags_mut().discard(Flags::CF | Flags::OF);
         *self.0.lazy_op_mut() = LazyOp::IMul32(dst, src);
         result
     }

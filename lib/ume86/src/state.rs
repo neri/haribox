@@ -306,16 +306,6 @@ impl ProcessorState {
     }
 
     #[inline]
-    pub fn flags(&self) -> &FlagsRegister {
-        &self.flags
-    }
-
-    #[inline]
-    pub fn flags_mut(&mut self) -> &mut FlagsRegister {
-        &mut self.flags
-    }
-
-    #[inline]
     pub fn cs(&self) -> &SegmentRegister {
         self.sr(CS)
     }
@@ -346,6 +336,21 @@ impl ProcessorState {
     }
 
     #[inline]
+    pub fn flags(&self) -> &FlagsRegister {
+        &self.flags
+    }
+
+    #[inline]
+    pub fn flags_mut(&mut self) -> &mut FlagsRegister {
+        &mut self.flags
+    }
+
+    #[inline]
+    pub fn compute_flags(&mut self) -> Flags {
+        self.flags.resolve(&self.lazy_op)
+    }
+
+    #[inline]
     pub fn lazy_op(&self) -> &LazyOp {
         &self.lazy_op
     }
@@ -353,11 +358,6 @@ impl ProcessorState {
     #[inline]
     pub fn lazy_op_mut(&mut self) -> &mut LazyOp {
         &mut self.lazy_op
-    }
-
-    #[inline]
-    pub fn compute_flags(&mut self) -> Flags {
-        self.flags.resolve(&self.lazy_op)
     }
 
     #[inline]

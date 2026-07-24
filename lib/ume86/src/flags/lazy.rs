@@ -275,7 +275,7 @@ impl LazyOp {
             Self::Dec16(a) => (*a & 0x0f) == 0x00,
             Self::Dec32(a) => (*a & 0x0f) == 0x00,
         };
-        flags.set_value(Flags::AF, result);
+        flags.set_dynamic(Flags::AF, result);
     }
 
     /// Resolves the Parity Flag (PF) based on the operation and its operands.
@@ -329,7 +329,7 @@ impl LazyOp {
             | Self::IMul16(_, _)
             | Self::IMul32(_, _) => return,
         };
-        flags.set_value(Flags::PF, PARITY_TABLE[result as usize]);
+        flags.set_dynamic(Flags::PF, PARITY_TABLE[result as usize]);
     }
 
     /// Resolves the Zero Flag (ZF) based on the operation and its operands.
@@ -384,7 +384,7 @@ impl LazyOp {
             | Self::IMul16(_, _)
             | Self::IMul32(_, _) => return,
         };
-        flags.set_value(Flags::ZF, result);
+        flags.set_dynamic(Flags::ZF, result);
     }
 
     /// Resolves the Sign Flag (SF) based on the operation and its operands.
@@ -438,7 +438,7 @@ impl LazyOp {
             | Self::IMul16(_, _)
             | Self::IMul32(_, _) => return,
         };
-        flags.set_value(Flags::SF, result);
+        flags.set_dynamic(Flags::SF, result);
     }
 
     /// Resolves the Overflow Flag (OF) based on the operation and its operands.
@@ -548,6 +548,6 @@ impl LazyOp {
                 return;
             }
         };
-        flags.set_value(Flags::OF, of);
+        flags.set_dynamic(Flags::OF, of);
     }
 }

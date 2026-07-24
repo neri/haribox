@@ -17,7 +17,7 @@ impl Flags {
     /// Carry flag
     pub const CF: Self = Self(0x0000_0001);
     /// Reserved Always 1
-    pub const _VF: Self = Self(0x0000_0002);
+    // pub const _VF: Self = Self(0x0000_0002);
     /// Parity flag
     pub const PF: Self = Self(0x0000_0004);
     /// Adjust flag
@@ -188,24 +188,37 @@ impl FlagsRegister {
         }
     }
 
+    /// Sets the dynamic value of the FLAGS register and marks all flags as valid.
     #[inline]
     pub fn set(&mut self, value: Flags) {
         self.dynamic_value |= value;
         self.valid_mask |= value;
     }
 
+    /// Clears the dynamic value of the FLAGS register and marks all flags as valid.
     #[inline]
     pub fn clear(&mut self, value: Flags) {
         self.dynamic_value &= !value;
         self.valid_mask |= value;
     }
 
+    /// Sets the dynamic value of a specific flag in the FLAGS register.
     #[inline]
-    pub fn set_value(&mut self, flag: Flags, value: bool) {
+    pub fn set_dynamic(&mut self, flag: Flags, value: bool) {
         if value {
             self.set(flag);
         } else {
             self.clear(flag);
+        }
+    }
+
+    /// Sets the static value of a specific flag in the FLAGS register.
+    #[inline]
+    pub fn set_static(&mut self, flag: Flags, value: bool) {
+        if value {
+            self.static_value |= flag;
+        } else {
+            self.static_value &= !flag;
         }
     }
 
@@ -242,6 +255,7 @@ impl FlagsRegister {
         self.valid_mask = Flags::ZF | Flags::CF;
     }
 
+    /// Adjusts the flags after shift operations (SHL, SHR, SAR).
     pub fn adjust_after_shift(&mut self, is_zero: bool) {
         self.dynamic_value = if is_zero { Flags::ZF } else { Flags::ZERO };
         self.valid_mask = Flags::ZF;
@@ -260,18 +274,14 @@ impl FlagsRegister {
         lazy_op.resolve_all_flags(self);
         self.dynamic_value = self.dynamic_value & Self::DYNAMIC_VALUE_MASK;
         self.static_value = self.static_value & !Self::DYNAMIC_VALUE_MASK;
-        self.computed()
+        (self.dynamic_value | self.static_value) & self.always_0_mask | self.always_1_mask
     }
 
-    pub fn unresolve(&mut self, mask: Flags) {
+    /// Discards the specified flags from the dynamic value
+    #[inline]
+    pub fn discard(&mut self, mask: Flags) {
         self.dynamic_value &= !mask;
         self.valid_mask |= mask;
-    }
-
-    /// Returns the computed value of the FLAGS register, combining dynamic and static values with the appropriate masks.
-    #[inline]
-    pub fn computed(&self) -> Flags {
-        (self.dynamic_value | self.static_value) & self.always_0_mask | self.always_1_mask
     }
 
     #[inline]

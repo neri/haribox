@@ -196,13 +196,14 @@ impl App {
                 }
                 let last_upc = tracer.current_upc();
 
-                let state = self.emulator.state();
+                let state = self.emulator.state_mut();
+                let flags = state.compute_flags();
                 buf.push(format!(
                     "[rust] {:?}, EIP={:#010x}, UPC={} Flags={:#010x}",
                     err,
                     state.eip().read(),
                     last_upc.0,
-                    state.flags().computed().bits(),
+                    flags.bits(),
                 ));
                 buf.push(format!(
                     "[rust] EAX={:#010x}, EBX={:#010x}, ECX={:#010x}, EDX={:#010x}",

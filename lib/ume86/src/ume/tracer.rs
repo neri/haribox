@@ -53,7 +53,7 @@ impl TraceDecoder {
 
     /// Returns the current instruction and fetches if necessary
     #[inline]
-    pub fn peek_uop(&mut self) -> Option<Uop> {
+    pub fn fetch_uop(&mut self) -> Option<Uop> {
         if let Some(&uop) = self.uop_cache.get(self.current_upc.0 as usize) {
             match uop {
                 Uop::FetchNext(eip) => {
@@ -62,7 +62,7 @@ impl TraceDecoder {
                 _ => return Some(uop),
             }
         } else {
-            self._peek_uop2()
+            self._fetch_uop2()
         }
     }
 
@@ -80,7 +80,7 @@ impl TraceDecoder {
         self.uop_cache.get(self.current_upc.0 as usize).copied()
     }
 
-    fn _peek_uop2(&mut self) -> Option<Uop> {
+    fn _fetch_uop2(&mut self) -> Option<Uop> {
         self.fetch_and_decode();
         self.uop_cache.get(self.current_upc.0 as usize).copied()
     }
@@ -591,7 +591,7 @@ impl TraceDecoder {
                 }
 
                 IrOp::MUL_Rd(rd) => {
-                    self.uop_cache.push(Uop::MulR(rd.into()));
+                    self.uop_cache.push(Uop::Minor(UopMinor::MulR(rd.into())));
                 }
 
                 IrOp::NEG_MdA32(ma) => {
