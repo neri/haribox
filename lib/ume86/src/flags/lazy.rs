@@ -286,13 +286,13 @@ impl LazyOp {
         }
         let result = match self {
             Self::And8(a, b) => a & b,
-            Self::Or8(a, b) => a | b,
-            Self::Xor8(a, b) => a ^ b,
             Self::And16(a, b) => (a & b) as u8,
-            Self::Or16(a, b) => (a | b) as u8,
-            Self::Xor16(a, b) => (a ^ b) as u8,
             Self::And32(a, b) => (a & b) as u8,
+            Self::Or8(a, b) => a | b,
+            Self::Or16(a, b) => (a | b) as u8,
             Self::Or32(a, b) => (a | b) as u8,
+            Self::Xor8(a, b) => a ^ b,
+            Self::Xor16(a, b) => (a ^ b) as u8,
             Self::Xor32(a, b) => (a ^ b) as u8,
             Self::Add8(a, b) => a.wrapping_add(*b),
             Self::Add16(a, b) => a.wrapping_add(*b) as u8,
@@ -341,13 +341,13 @@ impl LazyOp {
         }
         let result = match self {
             Self::And8(a, b) => (a & b) == 0,
-            Self::Or8(a, b) => (a | b) == 0,
-            Self::Xor8(a, b) => (a ^ b) == 0,
             Self::And16(a, b) => (a & b) == 0,
-            Self::Or16(a, b) => (a | b) == 0,
-            Self::Xor16(a, b) => (a ^ b) == 0,
             Self::And32(a, b) => (a & b) == 0,
+            Self::Or8(a, b) => (a | b) == 0,
+            Self::Or16(a, b) => (a | b) == 0,
             Self::Or32(a, b) => (a | b) == 0,
+            Self::Xor8(a, b) => (a ^ b) == 0,
+            Self::Xor16(a, b) => (a ^ b) == 0,
             Self::Xor32(a, b) => (a ^ b) == 0,
             Self::Add8(a, b) => a.wrapping_add(*b) == 0,
             Self::Add16(a, b) => a.wrapping_add(*b) == 0,
@@ -395,13 +395,13 @@ impl LazyOp {
         }
         let result = match self {
             Self::And8(a, b) => ((a & b) as i8) < 0,
-            Self::Or8(a, b) => ((a | b) as i8) < 0,
-            Self::Xor8(a, b) => ((a ^ b) as i8) < 0,
             Self::And16(a, b) => ((a & b) as i16) < 0,
-            Self::Or16(a, b) => ((a | b) as i16) < 0,
-            Self::Xor16(a, b) => ((a ^ b) as i16) < 0,
             Self::And32(a, b) => ((a & b) as i32) < 0,
+            Self::Or8(a, b) => ((a | b) as i8) < 0,
+            Self::Or16(a, b) => ((a | b) as i16) < 0,
             Self::Or32(a, b) => ((a | b) as i32) < 0,
+            Self::Xor8(a, b) => ((a ^ b) as i8) < 0,
+            Self::Xor16(a, b) => ((a ^ b) as i16) < 0,
             Self::Xor32(a, b) => ((a ^ b) as i32) < 0,
             Self::Add8(a, b) => (a.wrapping_add(*b) as i8) < 0,
             Self::Add16(a, b) => (a.wrapping_add(*b) as i16) < 0,
@@ -449,13 +449,13 @@ impl LazyOp {
         }
         let of = match self {
             Self::And8(_, _)
-            | Self::Or8(_, _)
-            | Self::Xor8(_, _)
             | Self::And16(_, _)
-            | Self::Or16(_, _)
-            | Self::Xor16(_, _)
             | Self::And32(_, _)
+            | Self::Or8(_, _)
+            | Self::Or16(_, _)
             | Self::Or32(_, _)
+            | Self::Xor8(_, _)
+            | Self::Xor16(_, _)
             | Self::Xor32(_, _) => false,
             Self::Add8(a, b) => (((*a) as i8).checked_add(*b as i8)).is_none(),
             Self::Add16(a, b) => (((*a) as i16).checked_add(*b as i16)).is_none(),

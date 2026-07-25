@@ -71,7 +71,7 @@ pub struct WindowId(pub u32);
 pub struct HariWindow {
     window_id: WindowId,
     size: Size,
-    buffer: u32,
+    buffer_ptr: u32,
     buffer_len: usize,
     rgba_buffer: UnsafeCell<Box<[u8]>>,
 }
@@ -85,7 +85,7 @@ impl HariWindow {
     /// Creates a new window with the specified `title` and `size`.
     ///
     /// NOTE: The window buffer of Haribote OS includes the window frame and title bar, so it is necessary to adjust the window size considering the height of the host OS's title bar.
-    pub fn new(context: &App, title: &JisString, size: Size, buffer: u32) -> Self {
+    pub fn new(context: &App, title: &JisString, size: Size, buffer_ptr: u32) -> Self {
         let title = title.to_str().unwrap_or("Untitled");
         let width = size.width - (Self::WINDOW_ADJUST_X * 2) as u32;
         let height = size.height - (Self::WINDOW_ADJUST_TOP + Self::WINDOW_ADJUST_BOTTOM) as u32
@@ -102,7 +102,7 @@ impl HariWindow {
         let window = Self {
             window_id,
             size,
-            buffer,
+            buffer_ptr,
             buffer_len: (size.width * size.height) as usize,
             rgba_buffer: UnsafeCell::new(rgba_buffer.into_boxed_slice()),
         };
@@ -113,8 +113,6 @@ impl HariWindow {
             Point::ZERO,
             Point::new(size.width as i32, size.height as i32),
         );
-
-        // js_activate_window(window_id.0);
 
         window
     }
@@ -132,7 +130,7 @@ impl HariWindow {
         context
             .emulator
             .data()
-            .get_mut(self.buffer as usize..self.buffer as usize + self.buffer_len)
+            .get_mut(self.buffer_ptr as usize..self.buffer_ptr as usize + self.buffer_len)
             .unwrap()
     }
 
@@ -199,18 +197,18 @@ impl HariWindow {
             assert!(width <= self.size.width as usize && height <= self.size.height as usize);
 
             // SAFETY: The buffer is accessed in a single-threaded context, and the slice is valid for the specified width and height.
-            let Some(draw_buffer) =
+            let Some(rgba_buffer) =
                 unsafe { &mut *self.rgba_buffer.get() }.get_mut(..width * height * 4)
             else {
                 return;
             };
-            let buffer = self.buffer(context);
+            let src_buffer = self.buffer(context);
 
             {
                 // Safety: The buffer is valid for the specified width and height, and the slice is properly aligned for u32 access.
-                let draw_buffer = unsafe {
+                let rgba_buffer = unsafe {
                     core::slice::from_raw_parts_mut(
-                        draw_buffer.as_mut_ptr() as *mut u32,
+                        rgba_buffer.as_mut_ptr() as *mut u32,
                         width * height,
                     )
                 };
@@ -219,9 +217,9 @@ impl HariWindow {
                 let mut base = clipped_left_top.y as usize * stride + clipped_left_top.x as usize;
                 for y in 0..height {
                     let draw_base = y * width;
-                    let slice = &buffer[base..base + width];
+                    let slice = &src_buffer[base..base + width];
                     for (x, &c) in slice.iter().enumerate() {
-                        draw_buffer[draw_base + x] = PALETTE[c as usize];
+                        rgba_buffer[draw_base + x] = PALETTE[c as usize];
                     }
                     base += stride;
                 }
@@ -233,8 +231,8 @@ impl HariWindow {
                 (clipped_left_top.y - Self::WINDOW_ADJUST_TOP) as u32,
                 width as u32,
                 height as u32,
-                draw_buffer.as_ptr(),
-                draw_buffer.len() as u32,
+                rgba_buffer.as_ptr(),
+                rgba_buffer.len() as u32,
             );
         }
     }
@@ -268,10 +266,11 @@ impl HariWindow {
 
     /// Sets the pixel at the specified `point` to the given `color`.
     pub fn set_pixel(&self, context: &App, point: Point, color: u8, redraw: bool) {
-        if self.try_clip_point(point).is_some() {
-            let index = (point.y as u32 * self.size.width + point.x as u32) as usize;
-            self.buffer(context)[index] = color;
+        if self.try_clip_point(point).is_none() {
+            return;
         }
+        let index = (point.y as u32 * self.size.width + point.x as u32) as usize;
+        self.buffer(context)[index] = color;
         if redraw {
             self.redraw_rect(context, point, point);
         }

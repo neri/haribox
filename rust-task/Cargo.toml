@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 wasm-bindgen = "0.2"
 ume86 = { path = "../lib/ume86" }
-hrb = { path = "../lib/ume86/lib/hrb" }
+hrb = { path = "../lib/hrb" }
 tek = { path = "../lib/tek" }
 
 [lib]

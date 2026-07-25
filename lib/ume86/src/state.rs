@@ -408,6 +408,7 @@ impl ProcessorState {
         self.flags.adjust_after_inc_dec(lazy_op, is_zero);
     }
 
+    /// Adjusts the flags after shift operations (SHL, SHR, SAR).
     #[inline]
     pub fn adjust_after_shift(&mut self, is_zero: bool) {
         self.flags.adjust_after_shift(is_zero);
@@ -423,7 +424,7 @@ impl ProcessorState {
             CC::Z => self.flags.zf(),
             CC::NZ => !self.flags.zf(),
             CC::BE => self.flags.zf() || self.resolve_cf(),
-            CC::NBE => !self.flags.zf() && !self.resolve_cf(),
+            CC::NBE => !(self.flags.zf() || self.resolve_cf()),
             CC::S => self.resolve_sf(),
             CC::NS => !self.resolve_sf(),
             CC::P => self.resolve_pf(),
@@ -438,7 +439,7 @@ impl ProcessorState {
             CC::NLE => {
                 let sf = self.resolve_sf();
                 let of = self.resolve_of();
-                !self.flags.zf() && (sf == of)
+                !(self.flags.zf() || (sf != of))
             }
         }
     }

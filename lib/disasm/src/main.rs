@@ -59,19 +59,31 @@ fn main() {
                 continue;
             }
         };
-        let mut input = Vec::new();
-        if let Err(e) = file.read_to_end(&mut input) {
+        let mut binary = Vec::new();
+        if let Err(e) = file.read_to_end(&mut binary) {
             eprintln!("{}: {}", path_input, e);
             continue;
         }
 
-        if let Some(elf_type) = elf::ElfFormat::identify(&input, None, None) {
+        if tek::tek_getsize(&binary).is_ok() {
+            match tek::tek_decomp(&binary) {
+                Ok(decompressed) => {
+                    binary = decompressed;
+                }
+                Err(err) => {
+                    eprintln!("{}: failed to decompress TEK file: {:?}", path_input, err);
+                    continue;
+                }
+            }
+        }
+
+        if let Some(elf_type) = elf::ElfFormat::identify(&binary, None, None) {
             // ELF
             if elf_type != elf::ElfFormat::Elf32 {
                 eprintln!("{}: unsupported ELF type: {:?}", path_input, elf_type);
                 continue;
             }
-            let elf = elf::elf32::Header::from_slice(&input).expect("failed to parse ELF header");
+            let elf = elf::elf32::Header::from_slice(&binary).expect("failed to parse ELF header");
             if elf.e_machine != elf::EM_386 {
                 eprintln!("{}: unsupported ELF type", path_input);
                 continue;
@@ -89,7 +101,7 @@ fn main() {
             }
 
             let entries = EntryReader::<elf::elf32::ProgramHeader>::new(
-                &input[elf.e_phoff as usize..],
+                &binary[elf.e_phoff as usize..],
                 elf.e_phentsize as usize,
                 elf.e_phnum as usize,
             )
@@ -104,7 +116,7 @@ fn main() {
                         {
                             let base = Offset32(entry.p_vaddr);
                             let size = entry.p_filesz as usize;
-                            let data = &input[entry.p_offset as usize..][..size];
+                            let data = &binary[entry.p_offset as usize..][..size];
                             disasm_section(&format!("segment {}", i), data, base, entry_point);
                         }
                     }
@@ -117,13 +129,13 @@ fn main() {
                         {
                             let base = Offset32(entry.p_vaddr);
                             let size = entry.p_filesz as usize;
-                            let data = &input[entry.p_offset as usize..][..size];
+                            let data = &binary[entry.p_offset as usize..][..size];
                             stats.append(data, base);
                         }
                     }
                 }
             }
-        } else if let Some(hrb) = hrb::HrbExecutable::identify(&input) {
+        } else if let Some(hrb) = hrb::HrbExecutable::identify(&binary) {
             // HRB
             let entry_point = Offset32(hrb.entry_point());
             let base_of_code = size_of::<hrb::HrbExecutable>();
@@ -137,14 +149,14 @@ fn main() {
                     }
                     disasm_section(
                         "code",
-                        &input[base_of_code..size_of_code],
+                        &binary[base_of_code..size_of_code],
                         Offset32(base_of_code as u32),
                         entry_point,
                     );
                 }
                 AppMode::Statistics(_) => {
                     stats.append(
-                        &input[base_of_code..size_of_code],
+                        &binary[base_of_code..size_of_code],
                         Offset32(base_of_code as u32),
                     );
                 }
@@ -259,10 +271,22 @@ fn disasm_section(name: &str, data: &[u8], base: Offset32, entry: Offset32) {
         for _ in opcodes.len()..max_opcodes {
             print!("   ");
         }
-        if matches!(ir, IrOp::UD) {
-            println!(" ???");
-        } else {
-            println!(" {:x?}", ir);
+
+        print!(" ");
+        match ir {
+            IrOp::UD => {
+                println!("???")
+            }
+            IrOp::CALL_Jv(target) => {
+                if let Some(func_no) = functions.get(&target) {
+                    println!("CALL <func_{}>", func_no);
+                } else {
+                    println!("CALL <label_{:08x}>", target.0);
+                }
+            }
+            _ => {
+                println!("{:x?}", ir)
+            }
         }
         if opcodes_size > max_opcodes {
             print!("           ");

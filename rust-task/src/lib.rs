@@ -16,9 +16,6 @@ extern crate alloc;
 pub mod haribote;
 
 pub mod prelude {
-    #[allow(unused_imports)]
-    pub use std::{print as _, println as _};
-
     pub use super::*;
 }
 

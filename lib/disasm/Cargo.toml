@@ -1,0 +1,10 @@
+[package]
+name = "disasm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+elf = { path = "../elf" }
+hrb = { path = "../hrb" }
+ir86 = { path = "../ir86" }
+tek = { path = "../tek" }

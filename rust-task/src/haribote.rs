@@ -27,17 +27,13 @@ pub struct App {
     pub lang_mode: LangMode,
     pub title_bar_height: u32,
     pub emulator: UME,
+    pub cmdline: String,
 
     japanese_font: Vec<u8>,
-
     allocator: SimpleAllocator,
-
     files: FileManager,
     timers: TimerManager,
     windows: Vec<HariWindow>,
-
-    #[allow(dead_code)]
-    cmdline: String,
 }
 
 /// Generic Handle type
@@ -46,9 +42,12 @@ pub struct Handle(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AppState {
+    /// Running normally
     #[default]
     Running,
+    /// Waiting for a key event (non-blocking)
     GetKey,
+    /// Waiting for a key event (blocking)
     WaitKey,
 }
 
@@ -70,17 +69,20 @@ impl App {
             return None;
         };
 
-        // let magic_word = 0x24;
         let start_data = hrb.start_data as usize;
         let size_of_data = hrb.size_of_data as usize;
         let size_of_ds = hrb.size_of_ds as usize;
-        let esp = hrb.esp as usize;
-        let code = binary[..start_data].to_vec().into_boxed_slice();
-        let mut data = Vec::with_capacity(size_of_ds);
-        data.resize(esp, 0u8);
-        data.extend_from_slice(&binary[start_data..][..size_of_data]);
-        data.resize(size_of_ds, 0u8);
+        let esp = hrb.esp;
 
+        let code = binary[..start_data].to_vec().into_boxed_slice();
+
+        let mut data = Vec::with_capacity(size_of_ds);
+        // stack area
+        data.resize(esp as usize, 0u8);
+        // data area
+        data.extend_from_slice(&binary[start_data..][..size_of_data]);
+        // bss area
+        data.resize(size_of_ds, 0u8);
         let data = data.into_boxed_slice();
 
         let emulator = UME::new(
@@ -88,18 +90,23 @@ impl App {
             data,
             Offset32(0),
             Offset32(hrb.entry_point()),
-            Offset32(esp as u32),
+            Offset32(esp),
             Box::new(|msg| {
                 crate::println!("[rust] UME: {}", msg);
             }),
         );
 
         let japanese_font = rust_read_file("nihongo.fnt").unwrap_or_default();
+        let lang_mode = if japanese_font.is_empty() {
+            crate::lang::LangMode::Ascii
+        } else {
+            crate::lang::LangMode::ShiftJIS
+        };
 
         Some(Self {
             state: AppState::Running,
             max_step: 500_000,
-            lang_mode: crate::lang::LangMode::ShiftJIS,
+            lang_mode,
             title_bar_height,
             cmdline: cmdline.to_string(),
             emulator,
@@ -124,14 +131,14 @@ impl App {
             }
             AppState::WaitKey => {
                 let key = js_get_keyboard_event(1);
-                if key >= 0 {
+                if key < 0 {
+                    return Ok(ExitStatus::Wait(10));
+                } else {
                     let key = key as u32;
                     self.timers.ack(key);
                     self.emulator.state().eax().write(key);
                     self.state = AppState::Running;
                     skip_adjustment = true;
-                } else {
-                    return Ok(ExitStatus::Wait(10));
                 }
             }
         }
@@ -158,7 +165,7 @@ impl App {
 
         let status = loop {
             match self.emulator.execute() {
-                Ok(_) => break Ok(ExitStatus::Continue),
+                Ok(()) => break Ok(ExitStatus::Continue),
                 Err(Exception::Swi(64)) => match self.syscall() {
                     Ok(ExitStatus::Continue) => {
                         self.emulator.resume_next();
@@ -175,7 +182,8 @@ impl App {
                     self.emulator.state().eax().write(tsc as u32);
                     self.emulator.state().edx().write((tsc >> 32) as u32);
                     self.emulator.resume_next();
-                    break Ok(ExitStatus::Continue);
+                    continue;
+                    // break Ok(ExitStatus::Continue);
                 }
                 Err(e) => break Err(e),
             };
@@ -344,6 +352,9 @@ impl App {
             }
             10 => {
                 // free (ptr:eax, size:ecx)
+                let addr = self.emulator.state().eax().read() as usize;
+                let size = self.emulator.state().ecx().read() as usize;
+                self.allocator.free(addr, size);
             }
             11 => {
                 // set pixel (window:ebx, x:esi, y:edi, color:al)
@@ -471,14 +482,16 @@ impl App {
                     return Err(Exception::SegmentationViolation(Offset32(buf_ptr as u32)));
                 }
 
-                let read_data = self
+                let read = self
                     .files
                     .get(handle)
                     .map(|file| file.read(max_len))
-                    .unwrap();
-
-                data[buf_ptr..buf_ptr + read_data.len()].copy_from_slice(read_data);
-                self.emulator.state().eax().write(read_data.len() as u32);
+                    .map(|read_data| {
+                        data[buf_ptr..buf_ptr + read_data.len()].copy_from_slice(&read_data);
+                        read_data.len()
+                    })
+                    .unwrap_or(0);
+                self.emulator.state().eax().write(read as u32);
             }
             26 => {
                 // get cmdline

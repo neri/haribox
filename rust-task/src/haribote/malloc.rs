@@ -25,4 +25,8 @@ impl SimpleAllocator {
             Some(addr)
         }
     }
+
+    pub fn free(&mut self, _addr: usize, _size: usize) {
+        // TODO: No-op for now
+    }
 }

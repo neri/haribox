@@ -4,11 +4,12 @@
 use alloc::format;
 use core::cell::UnsafeCell;
 
+use ir86::encoding::sib::SibIndex;
+
 use crate::_prelude_::*;
 use crate::alu::Alu;
 use crate::gpr::PartialRegister;
 use crate::state::ProcessorState;
-use crate::ume::sib::SibIndex;
 use crate::ume::tracer::TraceDecoder;
 use crate::ume::uop::{AddrIndex, Uop, UopMinor};
 
@@ -115,6 +116,7 @@ impl UME {
         Some(value)
     }
 
+    /// Pops all general-purpose registers from the stack
     pub fn popad(&mut self) -> Option<()> {
         let esp_temp = self.state.esp().read();
         let p = self
@@ -167,13 +169,14 @@ impl UME {
         self.max_step
     }
 
+    /// Sets the maximum number of steps to execute before pausing
     #[inline]
     pub fn set_max_step(&mut self, max_step: isize) {
         self.max_step = max_step;
         self.remaining_steps = max_step;
     }
 
-    /// Updates the eip register from the current instruction pointer
+    /// Updates the EIP register from the current instruction pointer
     ///
     /// # Note
     /// This function may take O(n) time in the worst case.
@@ -325,6 +328,56 @@ impl UME {
             // ));
 
             match uop {
+                Uop::JccU(cc, target) => {
+                    if self.state.eval_cc(cc) {
+                        if let Some(addr_index) = self.tracer.resolve_target(target) {
+                            self.tracer.replace(TraceDecoder::jcc_opt(cc, addr_index));
+                            self.tracer.set_current_upc(addr_index);
+                            continue;
+                        } else {
+                            todo!("Failed to resolve target address: {:#x}", target.0);
+                        }
+                    }
+                }
+                Uop::Jcc(cc, target) => {
+                    if self.state.eval_cc(cc) {
+                        self.tracer.set_current_upc(target);
+                        continue;
+                    }
+                }
+                Uop::Jz(target) => {
+                    if self.state.flags().zf() {
+                        self.tracer.set_current_upc(target);
+                        continue;
+                    }
+                }
+                Uop::Jnz(target) => {
+                    if !self.state.flags().zf() {
+                        self.tracer.set_current_upc(target);
+                        continue;
+                    }
+                }
+                Uop::Jump(target) => {
+                    self.tracer.set_current_upc(target);
+                    continue;
+                }
+                Uop::JumpR(rs) => {
+                    let target = self.state.runtime(rs).e().read();
+                    self.tracer.set_eip(Offset32(target));
+                    continue;
+                }
+                Uop::Call(func_index, return_addr) => {
+                    self.push(return_addr.0).ok_or(Exception::StackFault)?;
+                    self.tracer.resolve_and_invoke_function(func_index);
+                    continue;
+                }
+                Uop::Ret(iw) => {
+                    let return_addr = self.pop().ok_or(Exception::StackFault)?;
+                    self.state().esp().modify(|v| v.wrapping_add(iw as u32));
+                    self.tracer.set_eip(Offset32(return_addr));
+                    continue;
+                }
+
                 Uop::LoadConst8(rd, ib) => {
                     self.state.rt8(rd).write(ib);
                 }
@@ -412,25 +465,6 @@ impl UME {
                     let value = u32::from_le_bytes(value.try_into().unwrap());
                     self.state.runtime(rd).e().write(value);
                 }
-                Uop::LoadBD32CS(rd, rb, disp) => {
-                    let base = self.state.runtime(rb).e().read();
-                    let addr = base.wrapping_add(disp.0) as usize;
-                    let value = self
-                        .code()
-                        .get(addr..addr + 4)
-                        .ok_or(Exception::SegmentationViolation(Offset32(addr as u32)))?;
-                    let value = u32::from_le_bytes(value.try_into().unwrap());
-                    self.state.runtime(rd).e().write(value);
-                }
-                Uop::LoadSIB32CS(rd, sib, disp) => {
-                    let addr = self.resolve_sib(sib).wrapping_add(disp.0) as usize;
-                    let value = self
-                        .code()
-                        .get(addr..addr + 4)
-                        .ok_or(Exception::SegmentationViolation(Offset32(addr as u32)))?;
-                    let value = u32::from_le_bytes(value.try_into().unwrap());
-                    self.state.runtime(rd).e().write(value);
-                }
 
                 Uop::StoreR8(rd, rb) => {
                     let base = self.state.runtime(rb).e().read();
@@ -487,44 +521,6 @@ impl UME {
                     self.state.runtime(rd).e().write(value);
                 }
 
-                Uop::JccU(cc, target) => {
-                    if self.state.eval_cc(cc) {
-                        if let Some(addr_index) = self.tracer.resolve_target(target) {
-                            self.tracer.replace(Uop::Jcc(cc, addr_index));
-                            self.tracer.set_current_upc(addr_index);
-                            continue;
-                        } else {
-                            todo!("Failed to resolve target address: {:#x}", target.0);
-                        }
-                    }
-                }
-                Uop::Jcc(cc, target) => {
-                    if self.state.eval_cc(cc) {
-                        self.tracer.set_current_upc(target);
-                        continue;
-                    }
-                }
-                Uop::Jump(target) => {
-                    self.tracer.set_current_upc(target);
-                    continue;
-                }
-                Uop::JumpR(rs) => {
-                    let target = self.state.runtime(rs).e().read();
-                    self.tracer.set_eip(Offset32(target));
-                    continue;
-                }
-                Uop::Call(func_index, return_addr) => {
-                    self.push(return_addr.0).ok_or(Exception::StackFault)?;
-                    self.tracer.resolve_and_invoke_function(func_index);
-                    continue;
-                }
-                Uop::Ret(iw) => {
-                    let return_addr = self.pop().ok_or(Exception::StackFault)?;
-                    self.state().esp().modify(|v| v.wrapping_add(iw as u32));
-                    self.tracer.set_eip(Offset32(return_addr));
-                    continue;
-                }
-
                 Uop::AddI8(rd, ib) => {
                     let dst = self.state.rt8(rd).read();
                     let result = self.alu().add8(dst, ib);
@@ -557,6 +553,13 @@ impl UME {
                     let src = self.state.runtime(rs).e().read();
                     let result = self.alu().add32(dst, src);
                     self.state.runtime(rd).e().write(result);
+                }
+                Uop::AddRMW(rd, rs) => {
+                    let addr = self.state.runtime(rd).e().read();
+                    let dst = self.read_memory32(addr)?;
+                    let src = self.state.runtime(rs).e().read();
+                    let result = self.alu().add32(dst, src);
+                    self.write_memory32(addr, result)?;
                 }
                 Uop::IncR(rd) => {
                     let dst = self.state.runtime(rd).e().read();
@@ -596,6 +599,13 @@ impl UME {
                     let src = self.state.runtime(rs).e().read();
                     let result = self.alu().sub32(dst, src);
                     self.state.runtime(rd).e().write(result);
+                }
+                Uop::SubRMW(rd, rs) => {
+                    let addr = self.state.runtime(rd).e().read();
+                    let dst = self.read_memory32(addr)?;
+                    let src = self.state.runtime(rs).e().read();
+                    let result = self.alu().sub32(dst, src);
+                    self.write_memory32(addr, result)?;
                 }
                 Uop::DecR(rd) => {
                     let dst = self.state.runtime(rd).e().read();
@@ -670,10 +680,32 @@ impl UME {
                     self.state.runtime(rd).e().write(result);
                 }
 
+                Uop::OrI8(rd, ib) => {
+                    let dst = self.state.rt8(rd).read();
+                    let result = self.alu().or8(dst, ib);
+                    self.state.rt8(rd).write(result);
+                }
+                Uop::OrI16(rd, iw) => {
+                    let dst = self.state.runtime(rd).w().read();
+                    let result = self.alu().or16(dst, iw);
+                    self.state.runtime(rd).w().write(result);
+                }
                 Uop::OrI(rd, id) => {
                     let dst = self.state.runtime(rd).e().read();
                     let result = self.alu().or32(dst, id);
                     self.state.runtime(rd).e().write(result);
+                }
+                Uop::OrR8(rd, rs) => {
+                    let dst = self.state.rt8(rd).read();
+                    let src = self.state.rt8(rs).read();
+                    let result = self.alu().or8(dst, src);
+                    self.state.rt8(rd).write(result);
+                }
+                Uop::OrR16(rd, rs) => {
+                    let dst = self.state.runtime(rd).w().read();
+                    let src = self.state.runtime(rs).w().read();
+                    let result = self.alu().or16(dst, src);
+                    self.state.runtime(rd).w().write(result);
                 }
                 Uop::OrR(rd, rs) => {
                     let dst = self.state.runtime(rd).e().read();
@@ -682,10 +714,32 @@ impl UME {
                     self.state.runtime(rd).e().write(result);
                 }
 
+                Uop::XorI8(rd, ib) => {
+                    let dst = self.state.rt8(rd).read();
+                    let result = self.alu().xor8(dst, ib);
+                    self.state.rt8(rd).write(result);
+                }
+                Uop::XorI16(rd, iw) => {
+                    let dst = self.state.runtime(rd).w().read();
+                    let result = self.alu().xor16(dst, iw);
+                    self.state.runtime(rd).w().write(result);
+                }
                 Uop::XorI(rd, id) => {
                     let dst = self.state.runtime(rd).e().read();
                     let result = self.alu().xor32(dst, id);
                     self.state.runtime(rd).e().write(result);
+                }
+                Uop::XorR8(rd, rs) => {
+                    let dst = self.state.rt8(rd).read();
+                    let src = self.state.rt8(rs).read();
+                    let result = self.alu().xor8(dst, src);
+                    self.state.rt8(rd).write(result);
+                }
+                Uop::XorR16(rd, rs) => {
+                    let dst = self.state.runtime(rd).w().read();
+                    let src = self.state.runtime(rs).w().read();
+                    let result = self.alu().xor16(dst, src);
+                    self.state.runtime(rd).w().write(result);
                 }
                 Uop::XorR(rd, rs) => {
                     let dst = self.state.runtime(rd).e().read();
@@ -698,6 +752,10 @@ impl UME {
                     let dst = self.state.rt8(rd).read();
                     self.alu().and8(dst, ib);
                 }
+                Uop::TestI16(rd, iw) => {
+                    let dst = self.state.runtime(rd).w().read();
+                    self.alu().and16(dst, iw);
+                }
                 Uop::TestI(rd, id) => {
                     let dst = self.state.runtime(rd).e().read();
                     self.alu().and32(dst, id);
@@ -706,6 +764,11 @@ impl UME {
                     let dst = self.state.rt8(rd).read();
                     let src = self.state.rt8(rs).read();
                     self.alu().and8(dst, src);
+                }
+                Uop::TestR16(rd, rs) => {
+                    let dst = self.state.runtime(rd).w().read();
+                    let src = self.state.runtime(rs).w().read();
+                    self.alu().and16(dst, src);
                 }
                 Uop::TestR(rd, rs) => {
                     let dst = self.state.runtime(rd).e().read();

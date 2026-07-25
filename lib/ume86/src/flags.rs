@@ -152,7 +152,7 @@ impl FlagsRegister {
 
     /// Creates a new `FlagsRegister` struct with the appropriate masks based on the CPU generation.
     pub fn new(generation: Generation) -> Self {
-        let mask0 = !Self::mask_0_for(generation);
+        let mask0 = Self::mask_0_for(generation);
         let mask1 = Self::mask_1_for(generation);
         Self {
             dynamic_value: Flags::ZERO,
@@ -222,17 +222,6 @@ impl FlagsRegister {
         }
     }
 
-    /// Adjusts the flags after logical operations (AND, OR, XOR).
-    ///
-    /// Note: Clear OF and CF on after logical operations, and set ZF according to the result. AF is undefined for logical operations.
-    #[inline]
-    pub fn adjust_after_logic_op(&mut self, is_zero: bool) {
-        let mask: Flags = Flags::OF | Flags::ZF | Flags::AF | Flags::CF;
-        let zf = if is_zero { Flags::ZF } else { Flags::ZERO };
-        self.dynamic_value = (self.dynamic_value & !mask) | zf;
-        self.valid_mask = mask;
-    }
-
     /// Adjusts the flags after generic arithmetic operations (ADD, SUB, etc.).
     #[inline]
     pub fn adjust_after_arith_op(&mut self, is_zero: bool) {
@@ -253,6 +242,17 @@ impl FlagsRegister {
         let zf = if is_zero { Flags::ZF } else { Flags::ZERO };
         self.dynamic_value = cf | zf;
         self.valid_mask = Flags::ZF | Flags::CF;
+    }
+
+    /// Adjusts the flags after logical operations (AND, OR, XOR).
+    ///
+    /// Note: Clear OF and CF on after logical operations, and set ZF according to the result. AF is undefined for logical operations.
+    #[inline]
+    pub fn adjust_after_logic_op(&mut self, is_zero: bool) {
+        let mask: Flags = Flags::OF | Flags::ZF | Flags::AF | Flags::CF;
+        let zf = if is_zero { Flags::ZF } else { Flags::ZERO };
+        self.dynamic_value = (self.dynamic_value & !mask) | zf;
+        self.valid_mask = mask;
     }
 
     /// Adjusts the flags after shift operations (SHL, SHR, SAR).

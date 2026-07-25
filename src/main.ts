@@ -2890,7 +2890,7 @@ const importDroppedFiles = async (files: FileList): Promise<void> => {
       continue;
     }
 
-    results.push(`Imported ${result.name} (${formatBytes(content.byteLength)})`);
+    results.push(`Imported ${result.name} (${formatBytes(content.byteLength)})\n`);
   }
 
   for (const message of results) {

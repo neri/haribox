@@ -12,6 +12,10 @@ pub struct FuncIndex(pub u16);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AddrIndex(pub u32);
 
+impl AddrIndex {
+    pub const BAD_ADDRESS: Self = AddrIndex(u32::MAX);
+}
+
 /// Micro Operation Code
 #[derive(Debug, Clone, Copy)]
 pub enum Uop {
@@ -28,6 +32,11 @@ pub enum Uop {
     /// Conditional Jump (Resolved)
     Jcc(CC, AddrIndex),
 
+    /// Jump if Zero
+    Jz(AddrIndex),
+    /// Jump if Not Zero
+    Jnz(AddrIndex),
+
     /// Call to Function
     Call(FuncIndex, Offset32),
     /// Return from Function
@@ -42,9 +51,9 @@ pub enum Uop {
 
     /// Move Register
     Move(RtReg, RtReg),
-
+    /// Move Register 8-bit
     Move8(RtReg8, RtReg8),
-
+    /// Move Register 16-bit
     Move16(RtReg, RtReg),
 
     /// Not Register
@@ -71,10 +80,6 @@ pub enum Uop {
 
     /// Load from Memory with Base Register and Code Segment
     LoadR32CS(RtReg, RtReg),
-    /// Load from Memory with Base and Displacement and Code Segment
-    LoadBD32CS(RtReg, RtReg, Offset32),
-    /// Load from Memory with Base, Index, Scale and Displacement and Code Segment
-    LoadSIB32CS(RtReg, SibIndex, Offset32),
 
     /// Store to Memory with Base Register
     StoreR32(RtReg, RtReg),
@@ -121,6 +126,8 @@ pub enum Uop {
     AddR8(RtReg8, RtReg8),
     /// Add Register Values (16-bit)
     AddR16(RtReg, RtReg),
+    /// Add Register Value and Memory Value (Read-Modify-Write)
+    AddRMW(RtReg, RtReg),
 
     /// Subtract Register and Immediate Value
     SubI(RtReg, u32),
@@ -134,6 +141,8 @@ pub enum Uop {
     SubR8(RtReg8, RtReg8),
     /// Subtract Register Values (16-bit)
     SubR16(RtReg, RtReg),
+    /// Subtract Register Value and Memory Value (Read-Modify-Write)
+    SubRMW(RtReg, RtReg),
 
     /// Negate Register Value
     NegR(RtReg),
@@ -142,7 +151,6 @@ pub enum Uop {
     CmpI(RtReg, u32),
     /// Compare Register Values
     CmpR(RtReg, RtReg),
-
     /// Compare Register and Immediate Value (8-bit)
     CmpI8(RtReg8, u8),
     /// Compare Register and Immediate Value (16-bit)
@@ -174,11 +182,27 @@ pub enum Uop {
     OrI(RtReg, u32),
     /// Or Register Values
     OrR(RtReg, RtReg),
+    /// Or Register and Immediate Value (8-bit)
+    OrI8(RtReg8, u8),
+    /// Or Register and Immediate Value (16-bit)
+    OrI16(RtReg, u16),
+    /// Or Register Values (8-bit)
+    OrR8(RtReg8, RtReg8),
+    /// Or Register Values (16-bit)
+    OrR16(RtReg, RtReg),
 
     /// Xor Register and Immediate Value
     XorI(RtReg, u32),
     /// Xor Register Values
     XorR(RtReg, RtReg),
+    /// Xor Register and Immediate Value (8-bit)
+    XorI8(RtReg8, u8),
+    /// Xor Register and Immediate Value (16-bit)
+    XorI16(RtReg, u16),
+    /// Xor Register Values (8-bit)
+    XorR8(RtReg8, RtReg8),
+    /// Xor Register Values (16-bit)
+    XorR16(RtReg, RtReg),
 
     /// Test Register and Immediate Value
     TestI(RtReg, u32),
@@ -186,9 +210,12 @@ pub enum Uop {
     TestR(RtReg, RtReg),
     /// Test Register and Immediate Value (8-bit)
     TestI8(RtReg8, u8),
-
+    /// Test Register and Immediate Value (16-bit)
+    TestI16(RtReg, u16),
     /// Test Register Values (8-bit)
     TestR8(RtReg8, RtReg8),
+    /// Test Register Values (16-bit)
+    TestR16(RtReg, RtReg),
 
     /// Integer Multiply by Register
     IMulR(RtReg, RtReg),
@@ -248,7 +275,10 @@ pub enum Uop {
 /// Minor Uop for special instructions
 #[derive(Debug, Clone, Copy)]
 pub enum UopMinor {
+    /// Convert Doubleword to Quadword
     Cdq,
+
+    /// Clear Direction Flag
     Cld,
 
     /// Identify the Processor and its Features
