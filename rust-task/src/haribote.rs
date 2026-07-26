@@ -46,9 +46,9 @@ pub enum AppState {
     #[default]
     Running,
     /// Waiting for a key event (non-blocking)
-    GetKey,
+    GetKey(bool),
     /// Waiting for a key event (blocking)
-    WaitKey,
+    WaitKey(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +63,8 @@ impl App {
     const OS_ID: u32 = 0x20454448;
 
     const OS_VER: u32 = 0;
+
+    const TIMER_ID_BIAS: u32 = 0x0001_0000;
 
     pub fn instantiate(binary: &[u8], cmdline: &str, title_bar_height: u32) -> Option<Self> {
         let Some(hrb) = hrb::HrbExecutable::identify(&binary) else {
@@ -118,24 +120,46 @@ impl App {
         })
     }
 
+    /// Returns the adjusted keycode based on the input code and whether it's an extended key.
+    pub fn adjust_keycode(&mut self, code: i32, is_ex: bool) -> u32 {
+        if code == -1 {
+            return u32::MAX;
+        }
+        let code = code as u32;
+        if code > Self::TIMER_ID_BIAS {
+            self.timers.ack(code);
+            let timer_value = code - Self::TIMER_ID_BIAS;
+            timer_value
+        } else if is_ex {
+            code
+        } else {
+            let code = code & 0xff;
+            let code = match code {
+                0x84 => 0x34,       // Arrow Left
+                0x85 => 0x36,       // Arrow Right
+                0x86 => 0x38,       // Arrow Up
+                0x87 => 0x32,       // Arrow Down
+                0x80.. => u32::MAX, // Ignore other keys
+                _ => code,
+            };
+            code
+        }
+    }
+
     pub fn run(&mut self, speed: isize) -> Result<ExitStatus, String> {
         let mut skip_adjustment = false;
         match self.state {
             AppState::Running => {}
-            AppState::GetKey => {
-                let key = js_get_keyboard_event(0);
-                let key = key as u32;
-                self.timers.ack(key);
+            AppState::GetKey(is_ex) => {
+                let key = self.adjust_keycode(js_get_keyboard_event(0), is_ex);
                 self.emulator.state().eax().write(key);
                 self.state = AppState::Running;
             }
-            AppState::WaitKey => {
-                let key = js_get_keyboard_event(1);
-                if key < 0 {
+            AppState::WaitKey(is_ex) => {
+                let key = self.adjust_keycode(js_get_keyboard_event(1), is_ex);
+                if key == u32::MAX {
                     return Ok(ExitStatus::Wait(10));
                 } else {
-                    let key = key as u32;
-                    self.timers.ack(key);
                     self.emulator.state().eax().write(key);
                     self.state = AppState::Running;
                     skip_adjustment = true;
@@ -402,10 +426,10 @@ impl App {
                 // get key
                 let sleep = self.emulator.state().eax().read() != 0;
                 if sleep {
-                    self.state = AppState::WaitKey;
+                    self.state = AppState::WaitKey(false);
                     return Ok(ExitStatus::Wait(10));
                 } else {
-                    self.state = AppState::GetKey;
+                    self.state = AppState::GetKey(false);
                     return Ok(ExitStatus::Wait(0));
                 }
             }
@@ -417,7 +441,7 @@ impl App {
                 // init timer (handle:ebx, value:eax)
                 self.timers.init(
                     Handle(self.emulator.state().ebx().read()),
-                    self.emulator.state().eax().read(),
+                    self.emulator.state().eax().read() + Self::TIMER_ID_BIAS,
                 );
             }
             18 => {
@@ -539,14 +563,22 @@ impl App {
             33 => {
                 // extended API 33
                 match self.emulator.state().ecx().read() {
-                    // int api_getTimeCount(void);
                     1 => {
+                        // int api_getTimeCount(void);
                         let timer = self.timers.get_monotonic_timer();
                         self.emulator.state().eax().write((timer / 10.0) as u32);
                     }
-                    // int api_getkeyEx(int mode);
-                    // 2 => {
-                    // }
+                    2 => {
+                        // int api_getkeyEx(int mode);
+                        let sleep = self.emulator.state().eax().read() != 0;
+                        if sleep {
+                            self.state = AppState::WaitKey(true);
+                            return Ok(ExitStatus::Wait(10));
+                        } else {
+                            self.state = AppState::GetKey(true);
+                            return Ok(ExitStatus::Wait(0));
+                        }
+                    }
                     _ => self.emulator.state().eax().write(0),
                 }
             }

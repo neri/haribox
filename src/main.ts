@@ -145,6 +145,7 @@ type KeyboardEventMessage = {
   altKey: boolean;
   metaKey: boolean;
   isAutoRepeat: boolean;
+  modifierBitmap: number;
 };
 
 type WindowCloseMessage = {
@@ -177,6 +178,97 @@ const APP_IDS = {
   TEXT_VIEWER: 'e97b8139-cebf-40cd-8805-a0b87192c50f',
   ONBOARDING: 'd1b3e8f4-7a2e-4c9d-b5f1-9a8c6d2e4f3b',
 } as const;
+
+// USB HID Keyboard modifier bits
+const MODIFIER_BITS = {
+  LEFT_CTRL: 0x01,   // Bit 0
+  LEFT_SHIFT: 0x02,  // Bit 1
+  LEFT_ALT: 0x04,    // Bit 2
+  LEFT_GUI: 0x08,    // Bit 3
+  RIGHT_CTRL: 0x10,  // Bit 4
+  RIGHT_SHIFT: 0x20, // Bit 5
+  RIGHT_ALT: 0x40,   // Bit 6
+  RIGHT_GUI: 0x80,   // Bit 7
+} as const;
+
+// Global modifier state management
+let modifierBitmap: number = 0;
+
+/**
+ * Get the modifier bitmap with left/right distinction
+ * @param event - KeyboardEvent
+ * @param isPressed - true for keydown, false for keyup
+ * @returns Updated modifier bitmap
+ */
+function updateModifierBitmap(event: KeyboardEvent, isPressed: boolean): number {
+  let bitmap = modifierBitmap;
+
+  if (isPressed) {
+    // Update based on code to distinguish left/right
+    switch (event.code) {
+      case 'ControlLeft':
+        bitmap |= MODIFIER_BITS.LEFT_CTRL;
+        break;
+      case 'ControlRight':
+        bitmap |= MODIFIER_BITS.RIGHT_CTRL;
+        break;
+      case 'ShiftLeft':
+        bitmap |= MODIFIER_BITS.LEFT_SHIFT;
+        break;
+      case 'ShiftRight':
+        bitmap |= MODIFIER_BITS.RIGHT_SHIFT;
+        break;
+      case 'AltLeft':
+        bitmap |= MODIFIER_BITS.LEFT_ALT;
+        break;
+      case 'AltRight':
+        bitmap |= MODIFIER_BITS.RIGHT_ALT;
+        break;
+      case 'MetaLeft':
+        bitmap |= MODIFIER_BITS.LEFT_GUI;
+        break;
+      case 'MetaRight':
+        bitmap |= MODIFIER_BITS.RIGHT_GUI;
+        break;
+    }
+  } else {
+    // Clear bit on keyup
+    switch (event.code) {
+      case 'ControlLeft':
+        bitmap &= ~MODIFIER_BITS.LEFT_CTRL;
+        break;
+      case 'ControlRight':
+        bitmap &= ~MODIFIER_BITS.RIGHT_CTRL;
+        break;
+      case 'ShiftLeft':
+        bitmap &= ~MODIFIER_BITS.LEFT_SHIFT;
+        break;
+      case 'ShiftRight':
+        bitmap &= ~MODIFIER_BITS.RIGHT_SHIFT;
+        break;
+      case 'AltLeft':
+        bitmap &= ~MODIFIER_BITS.LEFT_ALT;
+        break;
+      case 'AltRight':
+        bitmap &= ~MODIFIER_BITS.RIGHT_ALT;
+        break;
+      case 'MetaLeft':
+        bitmap &= ~MODIFIER_BITS.LEFT_GUI;
+        break;
+      case 'MetaRight':
+        bitmap &= ~MODIFIER_BITS.RIGHT_GUI;
+        break;
+    }
+  }
+
+  modifierBitmap = bitmap;
+  return bitmap;
+}
+
+// Reset modifier bitmap when window loses focus
+window.addEventListener('blur', () => {
+  modifierBitmap = 0;
+});
 
 // Markdown text to HTML converter (supports **bold** formatting)
 function renderMarkdown(text: string): string {
@@ -539,7 +631,7 @@ const playSound = (workerId: string, frequency: number, timestamp: number): void
     osc.type = 'square';
     osc.connect(gain);
     gain.connect(state.globalGain);
-    gain.gain.value = 0.3; // Limit oscillator output to prevent clipping
+    gain.gain.value = 0.15; // Reduced from 0.3 to lower square wave volume
 
     osc.start(state.audioContext.currentTime);
     state.oscillators.set(workerId, {
@@ -2238,8 +2330,8 @@ const createOnboardingPanel = (win: WindowModel): HTMLElement => {
 
   const featuresList = [
     '一般的なウィンドウシステムと同様にウィンドウ操作できます。',
-    'ファイルアプリから HRB ファイルを選択してGUIアプリを実行できます。',
-    '一部のアプリはターミナルでコマンド入力が必要な場合があります。',
+    'ファイル一覧から HRB ファイルを選択してGUIアプリを実行できます。',
+    '一部のアプリはターミナルでコマンド入力が必要なものがあります。',
     'ターミナルでは HELP コマンドで使用可能なコマンドを確認できます。',
     'ドラッグアンドドロップで外部の HRB ファイルを取り込めます。',
   ];
@@ -3103,6 +3195,9 @@ desktop.addEventListener('click', (event) => {
 
 // Keyboard input forwarding to Canvas window Worker
 document.addEventListener('keydown', (event: KeyboardEvent) => {
+  // Update modifier bitmap
+  const bitmap = updateModifierBitmap(event, true);
+
   // Forward to Canvas window Worker if Canvas is active
   if (state.activeWindowId) {
     const activeWindow = findWindowById(state.activeWindowId);
@@ -3121,6 +3216,7 @@ document.addEventListener('keydown', (event: KeyboardEvent) => {
           altKey: event.altKey,
           metaKey: event.metaKey,
           isAutoRepeat: event.repeat,
+          modifierBitmap: bitmap,
         };
         worker.postMessage(keyboardEvent);
         event.preventDefault();
@@ -3136,6 +3232,9 @@ document.addEventListener('keydown', (event: KeyboardEvent) => {
 });
 
 document.addEventListener('keyup', (event: KeyboardEvent) => {
+  // Update modifier bitmap
+  const bitmap = updateModifierBitmap(event, false);
+
   // Forward to Canvas window Worker if Canvas is active
   if (state.activeWindowId) {
     const activeWindow = findWindowById(state.activeWindowId);
@@ -3154,6 +3253,7 @@ document.addEventListener('keyup', (event: KeyboardEvent) => {
           altKey: event.altKey,
           metaKey: event.metaKey,
           isAutoRepeat: event.repeat,
+          modifierBitmap: bitmap,
         };
         worker.postMessage(keyboardEvent);
         event.preventDefault();

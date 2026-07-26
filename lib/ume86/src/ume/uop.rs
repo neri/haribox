@@ -39,6 +39,8 @@ pub enum Uop {
 
     /// Call to Function
     Call(FuncIndex, Offset32),
+    /// Call to Register
+    CallR(RtReg, Offset32),
     /// Return from Function
     Ret(u16),
 
@@ -265,6 +267,9 @@ pub enum Uop {
     /// Shift Arithmetic Right Register by Cl (16-bit)
     SarRCl16(RtReg),
 
+    /// Set Value of Register Based on Condition Code
+    SetCC(CC, RtReg8),
+
     /// Software Interrupt
     Swi(u8),
 
@@ -287,7 +292,17 @@ pub enum UopMinor {
     /// Multiply by Register
     MulR(RtReg),
 
-    /// Repeat Scasb
+    /// Repeat Compare String (Byte)
+    RepZCmpsb,
+
+    /// Repeat Move String (Byte)
+    RepMovsb,
+
+    /// Repeat Store String (Byte)
+    RepStosd,
+    RepStosb,
+
+    /// Repeat Scan String (Byte)
     RepNzScasb,
 
     /// Read Time-Stamp Counter

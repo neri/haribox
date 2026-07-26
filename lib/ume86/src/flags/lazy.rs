@@ -123,6 +123,12 @@ impl LazyOp {
             | Self::And32(_, _)
             | Self::Or32(_, _)
             | Self::Xor32(_, _) => false,
+            Self::Inc8(_)
+            | Self::Inc16(_)
+            | Self::Inc32(_)
+            | Self::Dec8(_)
+            | Self::Dec16(_)
+            | Self::Dec32(_) => unreachable!(),
             Self::Add8(a, b) => a.checked_add(*b).is_none(),
             Self::Add16(a, b) => a.checked_add(*b).is_none(),
             Self::Add32(a, b) => a.checked_add(*b).is_none(),
@@ -153,12 +159,6 @@ impl LazyOp {
                 .checked_sub(*b)
                 .and_then(|diff| diff.checked_sub(*cf as u32))
                 .is_none(),
-            Self::Inc8(_)
-            | Self::Inc16(_)
-            | Self::Inc32(_)
-            | Self::Dec8(_)
-            | Self::Dec16(_)
-            | Self::Dec32(_) => unreachable!(),
             Self::Mul8(a, b) => {
                 let (_result, carry) = a.overflowing_mul(*b);
                 carry

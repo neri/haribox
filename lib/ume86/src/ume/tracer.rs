@@ -263,6 +263,7 @@ impl TraceDecoder {
         }
     }
 
+    /// Generates a best effort store sequence for the given memory operand and source register.
     pub fn generate_store32(rd: RtReg, memopr: MemOpr32) -> Uop {
         match memopr.segment {
             SrIndex::CS => {
@@ -390,6 +391,10 @@ impl TraceDecoder {
                 IrOp::AND_Rd_Id(rd, id) => {
                     self.uop_cache.push(Uop::AndI(rd.into(), id));
                 }
+                IrOp::AND_Rd_MdA32(rd, ma) => {
+                    Self::emit_load32(&mut self.uop_cache, RtReg::MemData, ma);
+                    self.uop_cache.push(Uop::AndR(rd.into(), RtReg::MemData));
+                }
                 IrOp::AND_Rd_Rd(rd, rs) => {
                     self.uop_cache.push(Uop::AndR(rd.into(), rs.into()));
                 }
@@ -411,6 +416,17 @@ impl TraceDecoder {
                     });
                     self.uop_cache
                         .push(Uop::Call(func_index, fetcher.current_eip()));
+                    break;
+                }
+                IrOp::CALL_MdA32(ma) => {
+                    Self::emit_load32(&mut self.uop_cache, RtReg::MemData, ma);
+                    self.uop_cache
+                        .push(Uop::CallR(RtReg::MemData, fetcher.current_eip()));
+                    break;
+                }
+                IrOp::CALL_Rd(rd) => {
+                    self.uop_cache
+                        .push(Uop::CallR(rd.into(), fetcher.current_eip()));
                     break;
                 }
 
@@ -436,6 +452,9 @@ impl TraceDecoder {
                 }
                 IrOp::CMP_Rb_Ib(rd, ib) => {
                     self.uop_cache.push(Uop::CmpI8(rd.into(), ib));
+                }
+                IrOp::CMP_Rb_Rb(rd, rs) => {
+                    self.uop_cache.push(Uop::CmpR8(rd.into(), rs.into()));
                 }
                 IrOp::CMP_Rd_Id(rd, id) => {
                     self.uop_cache.push(Uop::CmpI(rd.into(), id));
@@ -667,9 +686,22 @@ impl TraceDecoder {
                 IrOp::RDTSC => {
                     self.uop_cache.push(Uop::Minor(UopMinor::RdTsc));
                 }
+                IrOp::REP_MOVSB(_sr, _a32) => {
+                    self.uop_cache.push(Uop::Minor(UopMinor::RepMovsb));
+                }
+                IrOp::REP_STOSD(_sr, _a32) => {
+                    self.uop_cache.push(Uop::Minor(UopMinor::RepStosd));
+                }
+                IrOp::REP_STOSB(_sr, _a32) => {
+                    self.uop_cache.push(Uop::Minor(UopMinor::RepStosb));
+                }
                 IrOp::REPNZ_SCASB(_sr, _a32) => {
                     self.uop_cache.push(Uop::Minor(UopMinor::RepNzScasb));
                 }
+                IrOp::REPZ_CMPSB(_sr, _a32) => {
+                    self.uop_cache.push(Uop::Minor(UopMinor::RepZCmpsb));
+                }
+
                 IrOp::RET_D32(iw) => {
                     self.uop_cache.push(Uop::Ret(iw));
                     break;
@@ -685,6 +717,10 @@ impl TraceDecoder {
                 }
                 IrOp::SAR_Rd_Ib(rd, ib) => {
                     self.uop_cache.push(Uop::SarI(rd.into(), ib));
+                }
+
+                IrOp::SETCC_Rb(cc, rd) => {
+                    self.uop_cache.push(Uop::SetCC(cc, rd.into()));
                 }
 
                 IrOp::SHL_MdA32_Cl(ma) => {
@@ -729,6 +765,9 @@ impl TraceDecoder {
                     self.uop_cache.push(Uop::ShrI(rd.into(), ib));
                 }
 
+                IrOp::SUB_Rb_Rb(rd, rs) => {
+                    self.uop_cache.push(Uop::SubR8(rd.into(), rs.into()));
+                }
                 IrOp::SUB_MdA32_Id(ma, id) => {
                     Self::emit_rmw32(&mut self.uop_cache, ma, |uop_cache| {
                         uop_cache.push(Uop::SubI(RtReg::MemData, id))

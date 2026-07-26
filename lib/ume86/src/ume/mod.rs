@@ -222,18 +222,6 @@ impl UME {
         }
     }
 
-    /// Executes a single step of the emulation
-    pub fn step(&mut self) -> Result<(), Exception> {
-        match self._step() {
-            Ok(_) => Ok(()),
-            Err(v) => {
-                self.adjust_after_exception();
-
-                Err(v)
-            }
-        }
-    }
-
     /// Resumes execution after a pause (e.g., after a syscall)
     #[inline]
     pub fn resume_next(&mut self) {
@@ -328,6 +316,10 @@ impl UME {
             // ));
 
             match uop {
+                Uop::SetCC(cc, rd) => {
+                    let value = self.state.eval_cc(cc) as u8;
+                    self.state.rt8(rd).write(value);
+                }
                 Uop::JccU(cc, target) => {
                     if self.state.eval_cc(cc) {
                         if let Some(addr_index) = self.tracer.resolve_target(target) {
@@ -369,6 +361,12 @@ impl UME {
                 Uop::Call(func_index, return_addr) => {
                     self.push(return_addr.0).ok_or(Exception::StackFault)?;
                     self.tracer.resolve_and_invoke_function(func_index);
+                    continue;
+                }
+                Uop::CallR(rd, return_addr) => {
+                    let target = self.state.runtime(rd).e().read();
+                    self.push(return_addr.0).ok_or(Exception::StackFault)?;
+                    self.tracer.set_eip(Offset32(target));
                     continue;
                 }
                 Uop::Ret(iw) => {
@@ -970,27 +968,114 @@ impl UME {
                     UopMinor::RdTsc => {
                         return Err(Exception::RdTsc);
                     }
+                    UopMinor::RepMovsb => {
+                        let mut ecx = self.state.ecx().read();
+                        if ecx > 0 {
+                            let mut esi = self.state.esi().read();
+                            let mut edi = self.state.edi().read();
+
+                            while ecx > 0 {
+                                let value = self.read_memory8(esi)?;
+                                self.write_memory8(edi, value)?;
+                                esi = esi.wrapping_add(1);
+                                edi = edi.wrapping_add(1);
+                                ecx = ecx.wrapping_sub(1);
+                            }
+
+                            self.state.esi().write(esi);
+                            self.state.edi().write(edi);
+                            self.state.ecx().write(ecx);
+                        }
+                    }
+                    UopMinor::RepStosd => {
+                        let mut ecx = self.state.ecx().read();
+                        if ecx > 0 {
+                            let mut edi = self.state.edi().read();
+                            let eax = self.state.eax().read();
+
+                            while ecx > 0 {
+                                self.write_memory32(edi, eax)?;
+                                edi = edi.wrapping_add(4);
+                                ecx = ecx.wrapping_sub(1);
+                            }
+
+                            self.state.edi().write(edi);
+                            self.state.ecx().write(ecx);
+                        }
+                    }
+                    UopMinor::RepStosb => {
+                        let mut ecx = self.state.ecx().read();
+                        if ecx > 0 {
+                            let mut edi = self.state.edi().read();
+                            let al = self.state.al().read();
+
+                            while ecx > 0 {
+                                self.write_memory8(edi, al)?;
+                                edi = edi.wrapping_add(1);
+                                ecx = ecx.wrapping_sub(1);
+                            }
+
+                            self.state.edi().write(edi);
+                            self.state.ecx().write(ecx);
+                        }
+                    }
+                    UopMinor::RepZCmpsb => {
+                        let mut ecx = self.state.ecx().read();
+                        if ecx > 0 {
+                            let mut esi = self.state.esi().read();
+                            let mut edi = self.state.edi().read();
+
+                            let mut value1 = self.read_memory8(esi)?;
+                            let mut value2 = self.read_memory8(edi)?;
+
+                            while ecx > 0 {
+                                value1 = match self.read_memory8(esi) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        self.state.esi().write(esi);
+                                        self.state.edi().write(edi);
+                                        self.state.ecx().write(ecx);
+                                        return Err(e);
+                                    }
+                                };
+                                value2 = match self.read_memory8(edi) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        self.state.esi().write(esi);
+                                        self.state.edi().write(edi);
+                                        self.state.ecx().write(ecx);
+                                        return Err(e);
+                                    }
+                                };
+                                esi = esi.wrapping_add(1);
+                                edi = edi.wrapping_add(1);
+                                ecx = ecx.wrapping_sub(1);
+                                if value1 != value2 {
+                                    break;
+                                }
+                            }
+
+                            self.alu().sub8(value1, value2);
+                            self.state.esi().write(esi);
+                            self.state.edi().write(edi);
+                            self.state.ecx().write(ecx);
+                        }
+                    }
                     UopMinor::RepNzScasb => {
                         let mut ecx = self.state.ecx().read();
                         if ecx > 0 {
                             let mut edi = self.state.edi().read();
                             let al = self.state.al().read();
 
-                            let mut value = self
-                                .data()
-                                .get(edi as usize)
-                                .copied()
-                                .ok_or(Exception::SegmentationViolation(Offset32(edi)))?;
+                            let mut value = self.read_memory8(edi)?;
 
                             while ecx > 0 {
-                                value = match self.data().get(edi as usize) {
-                                    Some(&v) => v,
-                                    None => {
+                                value = match self.read_memory8(edi) {
+                                    Ok(v) => v,
+                                    Err(e) => {
                                         self.state.edi().write(edi);
                                         self.state.ecx().write(ecx);
-                                        return Err(Exception::SegmentationViolation(Offset32(
-                                            edi,
-                                        )));
+                                        return Err(e);
                                     }
                                 };
                                 edi = edi.wrapping_add(1);

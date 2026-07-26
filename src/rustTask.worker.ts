@@ -35,6 +35,7 @@ type KeyboardEventMessage = {
     altKey: boolean;
     metaKey: boolean;
     isAutoRepeat: boolean;
+    modifierBitmap: number;
 };
 
 /**
@@ -132,18 +133,6 @@ const handleKeyboardEvent = (event: KeyboardEventMessage): void => {
         return;
     }
 
-    // Build modifier key string for logging
-    // const modifiers = [
-    //     event.ctrlKey && 'Ctrl',
-    //     event.shiftKey && 'Shift',
-    //     event.altKey && 'Alt',
-    //     event.metaKey && 'Meta',
-    // ]
-    //     .filter(Boolean)
-    //     .join('+');
-
-    // const modifierStr = modifiers ? `${modifiers}+` : '';
-
     // Convert key to numeric event code
     let eventCode: number = -1; // TBD for special keys
 
@@ -157,20 +146,48 @@ const handleKeyboardEvent = (event: KeyboardEventMessage): void => {
     } else if (event.eventType === 'keydown') {
         // Handle special keys (Enter, Arrow keys, Escape, etc.)
         switch (event.code) {
+            case 'Backspace': eventCode = 0x08; break; // Backspace
             case 'Enter': eventCode = 0x0a; break;// Carriage Return
-            case 'ArrowUp': eventCode = 0x38; break; // Custom code for Arrow Up
-            case 'ArrowDown': eventCode = 0x32; break; // Custom code for Arrow Down
-            case 'ArrowLeft': eventCode = 0x34; break; // Custom code for Arrow Left
-            case 'ArrowRight': eventCode = 0x36; break; // Custom code for Arrow Right
             case 'Escape': eventCode = 0x1b; break; // Escape
+            case 'PageUp': eventCode = 0x80; break; // Custom code for Page Up
+            case 'PageDown': eventCode = 0x81; break; // Custom code for Page Down
+            case 'End': eventCode = 0x82; break; // Custom code for End
+            case 'Home': eventCode = 0x83; break; // Custom code for Home
+            case 'ArrowLeft': eventCode = 0x84; break; // Custom code for Arrow Left
+            case 'ArrowRight': eventCode = 0x85; break; // Custom code for Arrow Right
+            case 'ArrowUp': eventCode = 0x86; break; // Custom code for Arrow Up
+            case 'ArrowDown': eventCode = 0x87; break; // Custom code for Arrow Down
+            case 'Insert': eventCode = 0x88; break; // Custom code for Insert
+            case 'Delete': eventCode = 0x89; break; // Custom code for Delete
         }
     }
-    // keyup events: TBD - currently not used
 
     // Only enqueue if we have a valid event code
     if (eventCode >= 0) {
-        workerState.eventQueue.push(eventCode);
-        // console.log(`[worker] Enqueued event code ${eventCode} (${event.eventType} - ${modifierStr}${event.key}) to global queue`);
+        // Encode modifier bitmap into upper byte (bit 8-15)
+        // USB HID modifier format:
+        // bit0: Left Ctrl, bit1: Left Shift, bit2: Left Alt, bit3: Left GUI
+        // bit4: Right Ctrl, bit5: Right Shift, bit6: Right Alt, bit7: Right GUI
+        // Maps to:
+        // bit8: Left Shift, bit9: Left Ctrl, bit10: Left Alt, bit11: -
+        // bit12: Right Shift, bit13: Right Ctrl, bit14: Right Alt, bit15: -
+        let eventWithModifier = eventCode;
+        const bitmap = event.modifierBitmap;
+
+        // Convert USB HID format to legacy haribote format
+        let modifierCode = 0;
+        if (bitmap & 0x01) modifierCode |= 0x02; // Left Ctrl -> bit 9
+        if (bitmap & 0x02) modifierCode |= 0x01; // Left Shift -> bit 8
+        if (bitmap & 0x04) modifierCode |= 0x04; // Left Alt -> bit 10
+        if (bitmap & 0x08) modifierCode |= 0x08; // Left GUI -> bit 11
+        if (bitmap & 0x10) modifierCode |= 0x20; // Right Ctrl -> bit 13
+        if (bitmap & 0x20) modifierCode |= 0x10; // Right Shift -> bit 12
+        if (bitmap & 0x40) modifierCode |= 0x40; // Right Alt -> bit 14
+        if (bitmap & 0x80) modifierCode |= 0x80; // Right GUI -> bit 15
+
+        eventWithModifier = eventCode | (modifierCode << 8);
+        workerState.eventQueue.push(eventWithModifier);
+        // console.log(`[worker] Enqueued event code 0x${eventWithModifier.toString(16)} (modifier=0x${event.modifierBitmap.toString(16)})`);
     } else {
         // console.log(`[worker] Skipped event: ${event.eventType} - ${modifierStr}${event.key} (code: ${event.code})`);
     }
@@ -493,8 +510,8 @@ const createWasmEnv = (): WasmEnv => {
         /**
          * js_get_keyboard_event(window_id) -> i32
          * Get the next keyboard event from the Worker's global event queue
-         * Returns event code (0 if queue is empty)
-         * Event codes: ASCII codes for character keys, 0 for empty queue
+         * Returns event code (-1 if queue is empty)
+         * Event codes: ASCII codes for character keys, -1 for empty queue
          * (設計書 14.2: Event queue interface)
          * 
          * Note: window_id parameter is accepted for compatibility but not used.
@@ -505,7 +522,7 @@ const createWasmEnv = (): WasmEnv => {
                 throw new Error('Worker state not initialized');
             }
 
-            // Dequeue and return the first event from global queue, or 0 if queue is empty
+            // Dequeue and return the first event from global queue, or -1 if queue is empty
             const event = workerState.eventQueue.shift();
             return event ?? -1;
         },
