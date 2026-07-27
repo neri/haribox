@@ -2347,7 +2347,7 @@ const createOnboardingPanel = (win: WindowModel): HTMLElement => {
 
   const betaNotice = document.createElement('p');
   betaNotice.className = 'onboarding-description';
-  betaNotice.textContent = '現在ベータ運用中です。未実装機能がたくさんあります。';
+  betaNotice.textContent = 'ベータ運用中です。外部のアプリはうまく動作しない場合があります。';
   contentContainer.appendChild(betaNotice);
 
   // // Tips section

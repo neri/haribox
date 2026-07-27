@@ -29,6 +29,9 @@ pub struct App {
     pub emulator: UME,
     pub cmdline: String,
 
+    tsc_raw: u64,
+    tsc_count: u64,
+
     japanese_font: Vec<u8>,
     allocator: SimpleAllocator,
     files: FileManager,
@@ -116,6 +119,8 @@ impl App {
             windows: Vec::new(),
             timers: TimerManager::new(),
             files: FileManager::new(),
+            tsc_raw: 0,
+            tsc_count: 0,
             japanese_font,
         })
     }
@@ -146,6 +151,7 @@ impl App {
         }
     }
 
+    /// Run the application
     pub fn run(&mut self, speed: isize) -> Result<ExitStatus, String> {
         let mut skip_adjustment = false;
         match self.state {
@@ -178,7 +184,7 @@ impl App {
             } else {
                 self.max_step
             }
-            .clamp(1000, 1_000_000);
+            .clamp(1_000, 2_000_000);
             // crate::println!(
             //     "[rust] run_task: speed={}, max_step={}",
             //     speed,
@@ -202,12 +208,18 @@ impl App {
                     Err(e) => break Err(e),
                 },
                 Err(Exception::RdTsc) => {
-                    let tsc = js_get_tick() as u64 * 1000_000;
+                    let tsc_raw = js_get_tick() as u64;
+                    let tsc_delta = tsc_raw.wrapping_sub(self.tsc_raw);
+                    self.tsc_raw = tsc_raw;
+
+                    let tsc_delta = tsc_delta * self.max_step as u64;
+                    let tsc = self.tsc_count.wrapping_add(tsc_delta);
+                    self.tsc_count = tsc;
+
                     self.emulator.state().eax().write(tsc as u32);
                     self.emulator.state().edx().write((tsc >> 32) as u32);
                     self.emulator.resume_next();
                     continue;
-                    // break Ok(ExitStatus::Continue);
                 }
                 Err(e) => break Err(e),
             };

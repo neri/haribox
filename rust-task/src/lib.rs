@@ -145,26 +145,22 @@ pub fn run_task(file_name: String, cmdline: String, title_bar_height: u32) {
         file_name, cmdline, title_bar_height
     );
 
-    let binary = rust_read_file(&file_name).expect("Failed to read binary file");
+    let mut binary = rust_read_file(&file_name).expect("Failed to read binary file");
 
-    let app = match App::instantiate(&binary, &cmdline, title_bar_height) {
-        Some(app) => app,
-        None => {
-            let decompressed = match tek::tek_decomp(&binary) {
-                Ok(decompressed) => decompressed,
-                Err(err) => {
-                    println!("[rust] Failed to decompress binary: {:?}", err);
-                    return;
-                }
-            };
-            match App::instantiate(&decompressed, &cmdline, title_bar_height) {
-                Some(app) => app,
-                None => {
-                    println!("Bad executable");
-                    return;
-                }
+    // Decompress tek
+    if let Ok(_) = tek::tek_getsize(&binary) {
+        match tek::tek_decomp(&binary) {
+            Ok(v) => binary = v,
+            Err(err) => {
+                println!("[tek] Failed to decompress binary: {:?}", err);
+                return;
             }
-        }
+        };
+    }
+
+    let Some(app) = App::instantiate(&binary, &cmdline, title_bar_height) else {
+        println!("Bad executable");
+        return;
     };
 
     // Safety: We ensure that APP is only accessed in a single-threaded context.
