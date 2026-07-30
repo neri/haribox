@@ -697,12 +697,8 @@ self.addEventListener('message', async (event: MessageEvent) => {
             throw new Error(`Task execution failed: ${execMsg}`);
         }
 
-        let speedAdjustment = 0;
         while (true) {
-            const time0 = performance.now();
-            const result = RustTask.loop(speedAdjustment);
-            const time1 = performance.now();
-            speedAdjustment = Math.max(time1 - time0, 0);
+            const result = RustTask.loop();
             if (result < 0) {
                 break;
             }

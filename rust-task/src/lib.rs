@@ -170,11 +170,11 @@ pub fn run_task(file_name: String, cmdline: String, title_bar_height: u32) {
 }
 
 #[wasm_bindgen]
-pub fn r#loop(speed: isize) -> Result<i32, String> {
+pub fn r#loop() -> Result<i32, String> {
     // Safety: We ensure that APP is only accessed in a single-threaded context.
     let app = unsafe { (&mut *(&raw mut APP)).get_mut() };
     if let Some(app) = app {
-        match app.run(speed) {
+        match app.run() {
             Ok(status) => match status {
                 ExitStatus::Continue => Ok(0),
                 ExitStatus::Exit => {

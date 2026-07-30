@@ -32,5 +32,16 @@ export default defineConfig(() => {
                 'env': new URL('./src/wasm/env.ts', import.meta.url).pathname,
             },
         },
+        build: {
+            // Embed WASM and all other assets into the bundle (no external files)
+            // This allows WASM to be loaded without fetch, improving reliability and performance
+            assetsInlineLimit: 1024 * 1024, // 1MB limit for asset inlining
+            rollupOptions: {
+                output: {
+                    // Ensure worker chunks also inline assets
+                    assetFileNames: undefined,
+                },
+            },
+        },
     };
 });

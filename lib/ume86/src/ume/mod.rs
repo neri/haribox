@@ -27,9 +27,6 @@ pub struct UME {
     state: ProcessorState,
     tracer: TraceDecoder,
 
-    max_step: isize,
-    remaining_steps: isize,
-
     #[allow(dead_code)]
     debug: Box<dyn FnMut(&str)>,
 }
@@ -67,8 +64,6 @@ impl UME {
             state,
             tracer,
             debug,
-            max_step: 1024,
-            remaining_steps: 0,
         }
     }
 
@@ -164,18 +159,6 @@ impl UME {
         self.tracer.code()
     }
 
-    #[inline]
-    pub fn max_step(&self) -> isize {
-        self.max_step
-    }
-
-    /// Sets the maximum number of steps to execute before pausing
-    #[inline]
-    pub fn set_max_step(&mut self, max_step: isize) {
-        self.max_step = max_step;
-        self.remaining_steps = max_step;
-    }
-
     /// Updates the EIP register from the current instruction pointer
     ///
     /// # Note
@@ -202,26 +185,6 @@ impl UME {
         self.state.compute_flags();
     }
 
-    /// Executes the emulation
-    pub fn execute(&mut self) -> Result<(), Exception> {
-        let mut remaining = self.remaining_steps;
-        loop {
-            match self._step() {
-                Ok(_) => {}
-                Err(v) => {
-                    self.adjust_after_exception();
-                    self.remaining_steps = remaining;
-                    return Err(v);
-                }
-            }
-            remaining -= 1;
-            if remaining <= 0 {
-                self.remaining_steps = self.max_step;
-                return Ok(());
-            }
-        }
-    }
-
     /// Resumes execution after a pause (e.g., after a syscall)
     #[inline]
     pub fn resume_next(&mut self) {
@@ -238,9 +201,14 @@ impl UME {
     pub fn resolve_sib(&self, sib: SibIndex) -> u32 {
         let (base, index, scale) = sib.to_sib();
         let base = base
-            .map(|base| self.state.gpr(base).e().read())
+            .map(|base| self.state.reg(base.into()).e().read())
             .unwrap_or(0);
-        let index = self.state.gpr(index).e().read().wrapping_shl(scale.shift());
+        let index = self
+            .state
+            .reg(index.into())
+            .e()
+            .read()
+            .wrapping_shl(scale.shift());
         base.wrapping_add(index)
     }
 
@@ -301,8 +269,16 @@ impl UME {
         Ok(())
     }
 
-    /// Executes a single step of the emulation
-    fn _step(&mut self) -> Result<(), Exception> {
+    /// Executes the emulation
+    pub fn execute(&mut self) -> Result<(), Exception> {
+        self._execute().map_err(|err| {
+            self.adjust_after_exception();
+            err
+        })
+    }
+
+    /// Executes the emulation
+    fn _execute(&mut self) -> Result<(), Exception> {
         loop {
             let uop = match self.tracer.fetch_uop() {
                 Some(uop) => uop,
@@ -316,9 +292,31 @@ impl UME {
             // ));
 
             match uop {
-                Uop::SetCC(cc, rd) => {
-                    let value = self.state.eval_cc(cc) as u8;
-                    self.state.rt8(rd).write(value);
+                Uop::Jump(target) => {
+                    self.tracer.set_current_upc(target);
+                    continue;
+                }
+                Uop::JumpR(rs) => {
+                    let target = self.state.reg(rs).e().read();
+                    self.tracer.set_eip(Offset32(target));
+                    continue;
+                }
+                Uop::Call(func_index, return_addr) => {
+                    self.push(return_addr.0).ok_or(Exception::StackFault)?;
+                    self.tracer.resolve_and_invoke_function(func_index);
+                    continue;
+                }
+                Uop::CallR(rd, return_addr) => {
+                    let target = self.state.reg(rd).e().read();
+                    self.push(return_addr.0).ok_or(Exception::StackFault)?;
+                    self.tracer.set_eip(Offset32(target));
+                    continue;
+                }
+                Uop::Ret(iw) => {
+                    let return_addr = self.pop().ok_or(Exception::StackFault)?;
+                    self.state().esp().modify(|v| v.wrapping_add(iw as u32));
+                    self.tracer.set_eip(Offset32(return_addr));
+                    continue;
                 }
                 Uop::JccU(cc, target) => {
                     if self.state.eval_cc(cc) {
@@ -349,156 +347,134 @@ impl UME {
                         continue;
                     }
                 }
-                Uop::Jump(target) => {
-                    self.tracer.set_current_upc(target);
-                    continue;
-                }
-                Uop::JumpR(rs) => {
-                    let target = self.state.runtime(rs).e().read();
-                    self.tracer.set_eip(Offset32(target));
-                    continue;
-                }
-                Uop::Call(func_index, return_addr) => {
-                    self.push(return_addr.0).ok_or(Exception::StackFault)?;
-                    self.tracer.resolve_and_invoke_function(func_index);
-                    continue;
-                }
-                Uop::CallR(rd, return_addr) => {
-                    let target = self.state.runtime(rd).e().read();
-                    self.push(return_addr.0).ok_or(Exception::StackFault)?;
-                    self.tracer.set_eip(Offset32(target));
-                    continue;
-                }
-                Uop::Ret(iw) => {
-                    let return_addr = self.pop().ok_or(Exception::StackFault)?;
-                    self.state().esp().modify(|v| v.wrapping_add(iw as u32));
-                    self.tracer.set_eip(Offset32(return_addr));
-                    continue;
+                Uop::SetCC(cc, rd) => {
+                    let value = self.state.eval_cc(cc) as u8;
+                    self.state.reg8(rd).write(value);
                 }
 
                 Uop::LoadConst8(rd, ib) => {
-                    self.state.rt8(rd).write(ib);
+                    self.state.reg8(rd).write(ib);
                 }
                 Uop::LoadConst16(rd, iw) => {
-                    self.state.runtime(rd).w().write(iw);
+                    self.state.reg(rd).w().write(iw);
                 }
                 Uop::LoadConst(rd, id) => {
-                    self.state.runtime(rd).e().write(id);
+                    self.state.reg(rd).e().write(id);
                 }
 
                 Uop::Move(rd, rs) => {
-                    let value = self.state.runtime(rs).e().read();
-                    self.state.runtime(rd).e().write(value);
+                    let value = self.state.reg(rs).e().read();
+                    self.state.reg(rd).e().write(value);
                 }
                 Uop::Move8(rd, rs) => {
-                    let value = self.state.rt8(rs).read();
-                    self.state.rt8(rd).write(value);
+                    let value = self.state.reg8(rs).read();
+                    self.state.reg8(rd).write(value);
                 }
                 Uop::Move16(rd, rs) => {
-                    let value = self.state.runtime(rs).w().read();
-                    self.state.runtime(rd).w().write(value);
+                    let value = self.state.reg(rs).w().read();
+                    self.state.reg(rd).w().write(value);
                 }
                 Uop::MovSx8(rd, rs) => {
-                    let value = self.state.rt8(rs).read() as i8 as i32 as u32;
-                    self.state.runtime(rd).e().write(value);
+                    let value = self.state.reg8(rs).read() as i8 as i32 as u32;
+                    self.state.reg(rd).e().write(value);
                 }
                 Uop::MovSx16(rd, rs) => {
-                    let value = self.state.runtime(rs).w().read() as i16 as i32 as u32;
-                    self.state.runtime(rd).e().write(value);
+                    let value = self.state.reg(rs).w().read() as i16 as i32 as u32;
+                    self.state.reg(rd).e().write(value);
                 }
                 Uop::MovZx8(rd, rs) => {
-                    let value = self.state.rt8(rs).read();
-                    self.state.runtime(rd).e().write(value as u32);
+                    let value = self.state.reg8(rs).read();
+                    self.state.reg(rd).e().write(value as u32);
                 }
                 Uop::MovZx16(rd, rs) => {
-                    let value = self.state.runtime(rs).w().read();
-                    self.state.runtime(rd).e().write(value as u32);
+                    let value = self.state.reg(rs).w().read();
+                    self.state.reg(rd).e().write(value as u32);
                 }
 
                 Uop::NotR(rd) => {
-                    let value = self.state.runtime(rd).e().read();
-                    self.state.runtime(rd).e().write(!value);
+                    let value = self.state.reg(rd).e().read();
+                    self.state.reg(rd).e().write(!value);
                 }
                 Uop::XchgR(rd, rs) => {
-                    let value_rd = self.state.runtime(rd).e().read();
-                    let value_rs = self.state.runtime(rs).e().read();
-                    self.state.runtime(rd).e().write(value_rs);
-                    self.state.runtime(rs).e().write(value_rd);
+                    let value_rd = self.state.reg(rd).e().read();
+                    let value_rs = self.state.reg(rs).e().read();
+                    self.state.reg(rd).e().write(value_rs);
+                    self.state.reg(rs).e().write(value_rd);
                 }
 
                 Uop::LoadR8(rd, rb) => {
-                    let base = self.state.runtime(rb).e().read();
+                    let base = self.state.reg(rb).e().read();
                     let value = self.read_memory8(base)?;
-                    self.state.rt8(rd).write(value);
+                    self.state.reg8(rd).write(value);
                 }
                 Uop::LoadR16(rd, rb) => {
-                    let base = self.state.runtime(rb).e().read();
+                    let base = self.state.reg(rb).e().read();
                     let value = self.read_memory16(base)?;
-                    self.state.runtime(rd).w().write(value);
+                    self.state.reg(rd).w().write(value);
                 }
                 Uop::LoadR32(rd, rb) => {
-                    let base = self.state.runtime(rb).e().read();
+                    let base = self.state.reg(rb).e().read();
                     let value = self.read_memory32(base)?;
-                    self.state.runtime(rd).e().write(value);
+                    self.state.reg(rd).e().write(value);
                 }
                 Uop::LoadBD32(rd, rb, disp) => {
-                    let base = self.state.runtime(rb).e().read();
+                    let base = self.state.reg(rb).e().read();
                     let addr = base.wrapping_add(disp.0);
                     let value = self.read_memory32(addr)?;
-                    self.state.runtime(rd).e().write(value);
+                    self.state.reg(rd).e().write(value);
                 }
                 Uop::LoadSIB32(rd, sib, disp) => {
                     let addr = self.resolve_sib(sib).wrapping_add(disp.0);
                     let value = self.read_memory32(addr)?;
-                    self.state.runtime(rd).e().write(value);
+                    self.state.reg(rd).e().write(value);
                 }
 
                 Uop::LoadR32CS(rd, rb) => {
-                    let base = self.state.runtime(rb).e().read();
+                    let base = self.state.reg(rb).e().read();
                     let addr = base as usize;
                     let value = self
                         .code()
                         .get(addr..addr + 4)
                         .ok_or(Exception::SegmentationViolation(Offset32(addr as u32)))?;
                     let value = u32::from_le_bytes(value.try_into().unwrap());
-                    self.state.runtime(rd).e().write(value);
+                    self.state.reg(rd).e().write(value);
                 }
 
                 Uop::StoreR8(rd, rb) => {
-                    let base = self.state.runtime(rb).e().read();
-                    let value = self.state.rt8(rd).read();
+                    let base = self.state.reg(rb).e().read();
+                    let value = self.state.reg8(rd).read();
                     self.write_memory8(base, value)?;
                 }
                 Uop::StoreR16(rd, rb) => {
-                    let base = self.state.runtime(rb).e().read();
-                    let value = self.state.runtime(rd).w().read();
+                    let base = self.state.reg(rb).e().read();
+                    let value = self.state.reg(rd).w().read();
                     self.write_memory16(base, value)?;
                 }
                 Uop::StoreR32(rd, rb) => {
-                    let base = self.state.runtime(rb).e().read();
-                    let value = self.state.runtime(rd).e().read();
+                    let base = self.state.reg(rb).e().read();
+                    let value = self.state.reg(rd).e().read();
                     self.write_memory32(base, value)?;
                 }
                 Uop::StoreBD32(rd, rb, disp) => {
-                    let base = self.state.runtime(rb).e().read();
+                    let base = self.state.reg(rb).e().read();
                     let addr = base.wrapping_add(disp.0);
-                    let value = self.state.runtime(rd).e().read();
+                    let value = self.state.reg(rd).e().read();
                     self.write_memory32(addr, value)?;
                 }
                 Uop::StoreSIB32(rd, sib, disp) => {
                     let addr = self.resolve_sib(sib).wrapping_add(disp.0);
-                    let value = self.state.runtime(rd).e().read();
+                    let value = self.state.reg(rd).e().read();
                     self.write_memory32(addr, value)?;
                 }
 
                 Uop::LeaBD(rd, rb, disp) => {
-                    let base = self.state.runtime(rb).e().read();
+                    let base = self.state.reg(rb).e().read();
                     let addr = base.wrapping_add(disp.0);
-                    self.state.runtime(rd).e().write(addr);
+                    self.state.reg(rd).e().write(addr);
                 }
                 Uop::LeaSIB(rd, sib, disp) => {
                     let addr = self.resolve_sib(sib).wrapping_add(disp.0);
-                    self.state.runtime(rd).e().write(addr);
+                    self.state.reg(rd).e().write(addr);
                 }
 
                 Uop::PushAd => {
@@ -508,7 +484,7 @@ impl UME {
                     self.push(id).ok_or(Exception::StackFault)?;
                 }
                 Uop::PushR(rd) => {
-                    let value = self.state.runtime(rd).e().read();
+                    let value = self.state.reg(rd).e().read();
                     self.push(value).ok_or(Exception::StackFault)?;
                 }
                 Uop::PopAd => {
@@ -516,278 +492,278 @@ impl UME {
                 }
                 Uop::PopR(rd) => {
                     let value = self.pop().ok_or(Exception::StackFault)?;
-                    self.state.runtime(rd).e().write(value);
+                    self.state.reg(rd).e().write(value);
                 }
 
                 Uop::AddI8(rd, ib) => {
-                    let dst = self.state.rt8(rd).read();
+                    let dst = self.state.reg8(rd).read();
                     let result = self.alu().add8(dst, ib);
-                    self.state.rt8(rd).write(result);
+                    self.state.reg8(rd).write(result);
                 }
                 Uop::AddI16(rd, iw) => {
-                    let dst = self.state.runtime(rd).w().read();
+                    let dst = self.state.reg(rd).w().read();
                     let result = self.alu().add16(dst, iw);
-                    self.state.runtime(rd).w().write(result);
+                    self.state.reg(rd).w().write(result);
                 }
                 Uop::AddI(rd, id) => {
-                    let dst = self.state.runtime(rd).e().read();
+                    let dst = self.state.reg(rd).e().read();
                     let result = self.alu().add32(dst, id);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
                 Uop::AddR8(rd, rs) => {
-                    let dst = self.state.rt8(rd).read();
-                    let src = self.state.rt8(rs).read();
+                    let dst = self.state.reg8(rd).read();
+                    let src = self.state.reg8(rs).read();
                     let result = self.alu().add8(dst, src);
-                    self.state.rt8(rd).write(result);
+                    self.state.reg8(rd).write(result);
                 }
                 Uop::AddR16(rd, rs) => {
-                    let dst = self.state.runtime(rd).w().read();
-                    let src = self.state.runtime(rs).w().read();
+                    let dst = self.state.reg(rd).w().read();
+                    let src = self.state.reg(rs).w().read();
                     let result = self.alu().add16(dst, src);
-                    self.state.runtime(rd).w().write(result);
+                    self.state.reg(rd).w().write(result);
                 }
                 Uop::AddR(rd, rs) => {
-                    let dst = self.state.runtime(rd).e().read();
-                    let src = self.state.runtime(rs).e().read();
+                    let dst = self.state.reg(rd).e().read();
+                    let src = self.state.reg(rs).e().read();
                     let result = self.alu().add32(dst, src);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
                 Uop::AddRMW(rd, rs) => {
-                    let addr = self.state.runtime(rd).e().read();
+                    let addr = self.state.reg(rd).e().read();
                     let dst = self.read_memory32(addr)?;
-                    let src = self.state.runtime(rs).e().read();
+                    let src = self.state.reg(rs).e().read();
                     let result = self.alu().add32(dst, src);
                     self.write_memory32(addr, result)?;
                 }
                 Uop::IncR(rd) => {
-                    let dst = self.state.runtime(rd).e().read();
+                    let dst = self.state.reg(rd).e().read();
                     let result = self.alu().inc32(dst);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
 
                 Uop::SubI8(rd, ib) => {
-                    let dst = self.state.rt8(rd).read();
+                    let dst = self.state.reg8(rd).read();
                     let result = self.alu().sub8(dst, ib);
-                    self.state.rt8(rd).write(result);
+                    self.state.reg8(rd).write(result);
                 }
                 Uop::SubI16(rd, iw) => {
-                    let dst = self.state.runtime(rd).w().read();
+                    let dst = self.state.reg(rd).w().read();
                     let result = self.alu().sub16(dst, iw);
-                    self.state.runtime(rd).w().write(result);
+                    self.state.reg(rd).w().write(result);
                 }
                 Uop::SubI(rd, id) => {
-                    let dst = self.state.runtime(rd).e().read();
+                    let dst = self.state.reg(rd).e().read();
                     let result = self.alu().sub32(dst, id);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
                 Uop::SubR8(rd, rs) => {
-                    let dst = self.state.rt8(rd).read();
-                    let src = self.state.rt8(rs).read();
+                    let dst = self.state.reg8(rd).read();
+                    let src = self.state.reg8(rs).read();
                     let result = self.alu().sub8(dst, src);
-                    self.state.rt8(rd).write(result);
+                    self.state.reg8(rd).write(result);
                 }
                 Uop::SubR16(rd, rs) => {
-                    let dst = self.state.runtime(rd).w().read();
-                    let src = self.state.runtime(rs).w().read();
+                    let dst = self.state.reg(rd).w().read();
+                    let src = self.state.reg(rs).w().read();
                     let result = self.alu().sub16(dst, src);
-                    self.state.runtime(rd).w().write(result);
+                    self.state.reg(rd).w().write(result);
                 }
                 Uop::SubR(rd, rs) => {
-                    let dst = self.state.runtime(rd).e().read();
-                    let src = self.state.runtime(rs).e().read();
+                    let dst = self.state.reg(rd).e().read();
+                    let src = self.state.reg(rs).e().read();
                     let result = self.alu().sub32(dst, src);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
                 Uop::SubRMW(rd, rs) => {
-                    let addr = self.state.runtime(rd).e().read();
+                    let addr = self.state.reg(rd).e().read();
                     let dst = self.read_memory32(addr)?;
-                    let src = self.state.runtime(rs).e().read();
+                    let src = self.state.reg(rs).e().read();
                     let result = self.alu().sub32(dst, src);
                     self.write_memory32(addr, result)?;
                 }
                 Uop::DecR(rd) => {
-                    let dst = self.state.runtime(rd).e().read();
+                    let dst = self.state.reg(rd).e().read();
                     let result = self.alu().dec32(dst);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
                 Uop::NegR(rd) => {
-                    let dst = self.state.runtime(rd).e().read();
+                    let dst = self.state.reg(rd).e().read();
                     let result = self.alu().sub32(0, dst);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
 
                 Uop::CmpI8(rd, ib) => {
-                    let dst = self.state.rt8(rd).read();
+                    let dst = self.state.reg8(rd).read();
                     self.alu().sub8(dst, ib);
                 }
                 Uop::CmpI16(rd, iw) => {
-                    let dst = self.state.runtime(rd).w().read();
+                    let dst = self.state.reg(rd).w().read();
                     self.alu().sub16(dst, iw);
                 }
                 Uop::CmpI(rd, id) => {
-                    let dst = self.state.runtime(rd).e().read();
+                    let dst = self.state.reg(rd).e().read();
                     self.alu().sub32(dst, id);
                 }
                 Uop::CmpR8(rd, rs) => {
-                    let dst = self.state.rt8(rd).read();
-                    let src = self.state.rt8(rs).read();
+                    let dst = self.state.reg8(rd).read();
+                    let src = self.state.reg8(rs).read();
                     self.alu().sub8(dst, src);
                 }
                 Uop::CmpR16(rd, rs) => {
-                    let dst = self.state.runtime(rd).w().read();
-                    let src = self.state.runtime(rs).w().read();
+                    let dst = self.state.reg(rd).w().read();
+                    let src = self.state.reg(rs).w().read();
                     self.alu().sub16(dst, src);
                 }
                 Uop::CmpR(rd, rs) => {
-                    let dst = self.state.runtime(rd).e().read();
-                    let src = self.state.runtime(rs).e().read();
+                    let dst = self.state.reg(rd).e().read();
+                    let src = self.state.reg(rs).e().read();
                     self.alu().sub32(dst, src);
                 }
 
                 Uop::AndI8(rd, ib) => {
-                    let dst = self.state.rt8(rd).read();
+                    let dst = self.state.reg8(rd).read();
                     let result = self.alu().and8(dst, ib);
-                    self.state.rt8(rd).write(result);
+                    self.state.reg8(rd).write(result);
                 }
                 Uop::AndI16(rd, iw) => {
-                    let dst = self.state.runtime(rd).w().read();
+                    let dst = self.state.reg(rd).w().read();
                     let result = self.alu().and16(dst, iw);
-                    self.state.runtime(rd).w().write(result);
+                    self.state.reg(rd).w().write(result);
                 }
                 Uop::AndI(rd, id) => {
-                    let dst = self.state.runtime(rd).e().read();
+                    let dst = self.state.reg(rd).e().read();
                     let result = self.alu().and32(dst, id);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
                 Uop::AndR8(rd, rs) => {
-                    let dst = self.state.rt8(rd).read();
-                    let src = self.state.rt8(rs).read();
+                    let dst = self.state.reg8(rd).read();
+                    let src = self.state.reg8(rs).read();
                     let result = self.alu().and8(dst, src);
-                    self.state.rt8(rd).write(result);
+                    self.state.reg8(rd).write(result);
                 }
                 Uop::AndR16(rd, rs) => {
-                    let dst = self.state.runtime(rd).w().read();
-                    let src = self.state.runtime(rs).w().read();
+                    let dst = self.state.reg(rd).w().read();
+                    let src = self.state.reg(rs).w().read();
                     let result = self.alu().and16(dst, src);
-                    self.state.runtime(rd).w().write(result);
+                    self.state.reg(rd).w().write(result);
                 }
                 Uop::AndR(rd, rs) => {
-                    let dst = self.state.runtime(rd).e().read();
-                    let src = self.state.runtime(rs).e().read();
+                    let dst = self.state.reg(rd).e().read();
+                    let src = self.state.reg(rs).e().read();
                     let result = self.alu().and32(dst, src);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
 
                 Uop::OrI8(rd, ib) => {
-                    let dst = self.state.rt8(rd).read();
+                    let dst = self.state.reg8(rd).read();
                     let result = self.alu().or8(dst, ib);
-                    self.state.rt8(rd).write(result);
+                    self.state.reg8(rd).write(result);
                 }
                 Uop::OrI16(rd, iw) => {
-                    let dst = self.state.runtime(rd).w().read();
+                    let dst = self.state.reg(rd).w().read();
                     let result = self.alu().or16(dst, iw);
-                    self.state.runtime(rd).w().write(result);
+                    self.state.reg(rd).w().write(result);
                 }
                 Uop::OrI(rd, id) => {
-                    let dst = self.state.runtime(rd).e().read();
+                    let dst = self.state.reg(rd).e().read();
                     let result = self.alu().or32(dst, id);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
                 Uop::OrR8(rd, rs) => {
-                    let dst = self.state.rt8(rd).read();
-                    let src = self.state.rt8(rs).read();
+                    let dst = self.state.reg8(rd).read();
+                    let src = self.state.reg8(rs).read();
                     let result = self.alu().or8(dst, src);
-                    self.state.rt8(rd).write(result);
+                    self.state.reg8(rd).write(result);
                 }
                 Uop::OrR16(rd, rs) => {
-                    let dst = self.state.runtime(rd).w().read();
-                    let src = self.state.runtime(rs).w().read();
+                    let dst = self.state.reg(rd).w().read();
+                    let src = self.state.reg(rs).w().read();
                     let result = self.alu().or16(dst, src);
-                    self.state.runtime(rd).w().write(result);
+                    self.state.reg(rd).w().write(result);
                 }
                 Uop::OrR(rd, rs) => {
-                    let dst = self.state.runtime(rd).e().read();
-                    let src = self.state.runtime(rs).e().read();
+                    let dst = self.state.reg(rd).e().read();
+                    let src = self.state.reg(rs).e().read();
                     let result = self.alu().or32(dst, src);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
 
                 Uop::XorI8(rd, ib) => {
-                    let dst = self.state.rt8(rd).read();
+                    let dst = self.state.reg8(rd).read();
                     let result = self.alu().xor8(dst, ib);
-                    self.state.rt8(rd).write(result);
+                    self.state.reg8(rd).write(result);
                 }
                 Uop::XorI16(rd, iw) => {
-                    let dst = self.state.runtime(rd).w().read();
+                    let dst = self.state.reg(rd).w().read();
                     let result = self.alu().xor16(dst, iw);
-                    self.state.runtime(rd).w().write(result);
+                    self.state.reg(rd).w().write(result);
                 }
                 Uop::XorI(rd, id) => {
-                    let dst = self.state.runtime(rd).e().read();
+                    let dst = self.state.reg(rd).e().read();
                     let result = self.alu().xor32(dst, id);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
                 Uop::XorR8(rd, rs) => {
-                    let dst = self.state.rt8(rd).read();
-                    let src = self.state.rt8(rs).read();
+                    let dst = self.state.reg8(rd).read();
+                    let src = self.state.reg8(rs).read();
                     let result = self.alu().xor8(dst, src);
-                    self.state.rt8(rd).write(result);
+                    self.state.reg8(rd).write(result);
                 }
                 Uop::XorR16(rd, rs) => {
-                    let dst = self.state.runtime(rd).w().read();
-                    let src = self.state.runtime(rs).w().read();
+                    let dst = self.state.reg(rd).w().read();
+                    let src = self.state.reg(rs).w().read();
                     let result = self.alu().xor16(dst, src);
-                    self.state.runtime(rd).w().write(result);
+                    self.state.reg(rd).w().write(result);
                 }
                 Uop::XorR(rd, rs) => {
-                    let dst = self.state.runtime(rd).e().read();
-                    let src = self.state.runtime(rs).e().read();
+                    let dst = self.state.reg(rd).e().read();
+                    let src = self.state.reg(rs).e().read();
                     let result = self.alu().xor32(dst, src);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
 
                 Uop::TestI8(rd, ib) => {
-                    let dst = self.state.rt8(rd).read();
+                    let dst = self.state.reg8(rd).read();
                     self.alu().and8(dst, ib);
                 }
                 Uop::TestI16(rd, iw) => {
-                    let dst = self.state.runtime(rd).w().read();
+                    let dst = self.state.reg(rd).w().read();
                     self.alu().and16(dst, iw);
                 }
                 Uop::TestI(rd, id) => {
-                    let dst = self.state.runtime(rd).e().read();
+                    let dst = self.state.reg(rd).e().read();
                     self.alu().and32(dst, id);
                 }
                 Uop::TestR8(rd, rs) => {
-                    let dst = self.state.rt8(rd).read();
-                    let src = self.state.rt8(rs).read();
+                    let dst = self.state.reg8(rd).read();
+                    let src = self.state.reg8(rs).read();
                     self.alu().and8(dst, src);
                 }
                 Uop::TestR16(rd, rs) => {
-                    let dst = self.state.runtime(rd).w().read();
-                    let src = self.state.runtime(rs).w().read();
+                    let dst = self.state.reg(rd).w().read();
+                    let src = self.state.reg(rs).w().read();
                     self.alu().and16(dst, src);
                 }
                 Uop::TestR(rd, rs) => {
-                    let dst = self.state.runtime(rd).e().read();
-                    let src = self.state.runtime(rs).e().read();
+                    let dst = self.state.reg(rd).e().read();
+                    let src = self.state.reg(rs).e().read();
                     self.alu().and32(dst, src);
                 }
 
                 Uop::IMulR(rd, rs) => {
-                    let dst = self.state.runtime(rd).e().read() as i32;
-                    let src = self.state.runtime(rs).e().read() as i32;
+                    let dst = self.state.reg(rd).e().read() as i32;
+                    let src = self.state.reg(rs).e().read() as i32;
                     let result = self.alu().imul32(dst, src);
-                    self.state.runtime(rd).e().write(result as u32);
+                    self.state.reg(rd).e().write(result as u32);
                 }
                 Uop::IMulRI(rd, rs, id) => {
-                    let src = self.state.runtime(rs).e().read() as i32;
+                    let src = self.state.reg(rs).e().read() as i32;
                     let result = self.alu().imul32(src, id);
-                    self.state.runtime(rd).e().write(result as u32);
+                    self.state.reg(rd).e().write(result as u32);
                 }
 
                 Uop::IDivR(rs) => {
-                    let divisor = self.state.runtime(rs).e().read() as i32;
+                    let divisor = self.state.reg(rs).e().read() as i32;
                     if divisor == 0 {
                         return Err(Exception::DivisionError);
                     }
@@ -811,7 +787,7 @@ impl UME {
                     }
                 }
                 Uop::DivR(rs) => {
-                    let divisor = self.state.runtime(rs).e().read();
+                    let divisor = self.state.reg(rs).e().read();
                     if divisor == 0 {
                         return Err(Exception::DivisionError);
                     }
@@ -835,103 +811,103 @@ impl UME {
                 }
 
                 Uop::SarI8(rd, ib) => {
-                    let dst = self.state.rt8(rd).read();
+                    let dst = self.state.reg8(rd).read();
                     let result = self.alu().sar8(dst, ib);
-                    self.state.rt8(rd).write(result);
+                    self.state.reg8(rd).write(result);
                 }
                 Uop::SarRCl8(rd) => {
-                    let dst = self.state.rt8(rd).read();
+                    let dst = self.state.reg8(rd).read();
                     let cl = self.state.cl().read() as u8;
                     let result = self.alu().sar8(dst, cl);
-                    self.state.rt8(rd).write(result);
+                    self.state.reg8(rd).write(result);
                 }
                 Uop::SarI16(rd, ib) => {
-                    let dst = self.state.runtime(rd).w().read();
+                    let dst = self.state.reg(rd).w().read();
                     let result = self.alu().sar16(dst, ib);
-                    self.state.runtime(rd).w().write(result);
+                    self.state.reg(rd).w().write(result);
                 }
                 Uop::SarRCl16(rd) => {
-                    let dst = self.state.runtime(rd).w().read();
+                    let dst = self.state.reg(rd).w().read();
                     let cl = self.state.cl().read() as u8;
                     let result = self.alu().sar16(dst, cl);
-                    self.state.runtime(rd).w().write(result);
+                    self.state.reg(rd).w().write(result);
                 }
                 Uop::SarI(rd, ib) => {
-                    let dst = self.state.runtime(rd).e().read();
+                    let dst = self.state.reg(rd).e().read();
                     let result = self.alu().sar32(dst, ib);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
                 Uop::SarRCl(rd) => {
-                    let dst = self.state.runtime(rd).e().read();
+                    let dst = self.state.reg(rd).e().read();
                     let cl = self.state.cl().read() as u8;
                     let result = self.alu().sar32(dst, cl);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
                 Uop::ShlI8(rd, ib) => {
-                    let dst = self.state.rt8(rd).read();
+                    let dst = self.state.reg8(rd).read();
                     let result = self.alu().shl8(dst, ib);
-                    self.state.rt8(rd).write(result);
+                    self.state.reg8(rd).write(result);
                 }
                 Uop::ShlI16(rd, iw) => {
-                    let dst = self.state.runtime(rd).w().read();
+                    let dst = self.state.reg(rd).w().read();
                     let result = self.alu().shl16(dst, iw);
-                    self.state.runtime(rd).w().write(result);
+                    self.state.reg(rd).w().write(result);
                 }
                 Uop::ShlI(rd, ib) => {
-                    let dst = self.state.runtime(rd).e().read();
+                    let dst = self.state.reg(rd).e().read();
                     let result = self.alu().shl32(dst, ib);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
                 Uop::ShlRCl8(rd) => {
-                    let dst = self.state.rt8(rd).read();
+                    let dst = self.state.reg8(rd).read();
                     let cl = self.state.cl().read() as u8;
                     let result = self.alu().shl8(dst, cl);
-                    self.state.rt8(rd).write(result);
+                    self.state.reg8(rd).write(result);
                 }
                 Uop::ShlRCl16(rd) => {
-                    let dst = self.state.runtime(rd).w().read();
+                    let dst = self.state.reg(rd).w().read();
                     let cl = self.state.cl().read() as u8;
                     let result = self.alu().shl16(dst, cl);
-                    self.state.runtime(rd).w().write(result);
+                    self.state.reg(rd).w().write(result);
                 }
                 Uop::ShlRCl(rd) => {
-                    let dst = self.state.runtime(rd).e().read();
+                    let dst = self.state.reg(rd).e().read();
                     let cl = self.state.cl().read() as u8;
                     let result = self.alu().shl32(dst, cl);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
                 Uop::ShrI8(rd, ib) => {
-                    let dst = self.state.rt8(rd).read();
+                    let dst = self.state.reg8(rd).read();
                     let result = self.alu().shr8(dst, ib);
-                    self.state.rt8(rd).write(result);
+                    self.state.reg8(rd).write(result);
                 }
                 Uop::ShrRCl8(rd) => {
-                    let dst = self.state.rt8(rd).read();
+                    let dst = self.state.reg8(rd).read();
                     let cl = self.state.cl().read() as u8;
                     let result = self.alu().shr8(dst, cl);
-                    self.state.rt8(rd).write(result);
+                    self.state.reg8(rd).write(result);
                 }
                 Uop::ShrI16(rd, ib) => {
-                    let dst = self.state.runtime(rd).w().read();
+                    let dst = self.state.reg(rd).w().read();
                     let result = self.alu().shr16(dst, ib);
-                    self.state.runtime(rd).w().write(result);
+                    self.state.reg(rd).w().write(result);
                 }
                 Uop::ShrRCl16(rd) => {
-                    let dst = self.state.runtime(rd).w().read();
+                    let dst = self.state.reg(rd).w().read();
                     let cl = self.state.cl().read() as u8;
                     let result = self.alu().shr16(dst, cl);
-                    self.state.runtime(rd).w().write(result);
+                    self.state.reg(rd).w().write(result);
                 }
                 Uop::ShrI(rd, ib) => {
-                    let dst = self.state.runtime(rd).e().read();
+                    let dst = self.state.reg(rd).e().read();
                     let result = self.alu().shr32(dst, ib);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
                 Uop::ShrRCl(rd) => {
-                    let dst = self.state.runtime(rd).e().read();
+                    let dst = self.state.reg(rd).e().read();
                     let cl = self.state.cl().read() as u8;
                     let result = self.alu().shr32(dst, cl);
-                    self.state.runtime(rd).e().write(result);
+                    self.state.reg(rd).e().write(result);
                 }
 
                 Uop::Swi(ib) => {
@@ -959,7 +935,7 @@ impl UME {
                         self.state.edx().write(cpuid_result.edx);
                     }
                     UopMinor::MulR(rd) => {
-                        let dst = self.state.runtime(rd).e().read();
+                        let dst = self.state.reg(rd).e().read();
                         let eax = self.state.eax().read();
                         let result = self.alu().mul32(eax, dst);
                         self.state.eax().write(result as u32);

@@ -11,7 +11,6 @@ pub struct TimerManager {
 
 pub struct Timer {
     value: u32,
-    deadline: f64,
     is_active: bool,
 }
 
@@ -27,7 +26,6 @@ impl TimerManager {
     pub fn allocate(&mut self) -> Handle {
         let timer = Timer {
             value: 0,
-            deadline: f64::INFINITY,
             is_active: false,
         };
         let handle = Handle(self.next_handle);
@@ -49,8 +47,6 @@ impl TimerManager {
 
     pub fn set(&mut self, handle: Handle, timeout: u32) {
         if let Some(timer) = self.timers.get_mut(&handle) {
-            let current_tick = js_get_tick();
-            timer.deadline = current_tick + timeout as f64;
             timer.is_active = true;
             js_schedule_event(timeout, timer.value as i32);
         }

@@ -110,7 +110,7 @@ impl App {
 
         Some(Self {
             state: AppState::Running,
-            max_step: 500_000,
+            max_step: 1_000_000,
             lang_mode,
             title_bar_height,
             cmdline: cmdline.to_string(),
@@ -152,8 +152,7 @@ impl App {
     }
 
     /// Run the application
-    pub fn run(&mut self, speed: isize) -> Result<ExitStatus, String> {
-        let mut skip_adjustment = false;
+    pub fn run(&mut self) -> Result<ExitStatus, String> {
         match self.state {
             AppState::Running => {}
             AppState::GetKey(is_ex) => {
@@ -168,29 +167,8 @@ impl App {
                 } else {
                     self.emulator.state().eax().write(key);
                     self.state = AppState::Running;
-                    skip_adjustment = true;
                 }
             }
-        }
-
-        // Adjust max_step based on actual execution time
-        if !skip_adjustment {
-            self.max_step = if speed > 10 {
-                self.max_step >> 2
-            } else if speed > 3 {
-                self.max_step >> 1
-            } else if speed == 0 {
-                self.max_step.saturating_mul(3).wrapping_shr(1)
-            } else {
-                self.max_step
-            }
-            .clamp(1_000, 2_000_000);
-            // crate::println!(
-            //     "[rust] run_task: speed={}, max_step={}",
-            //     speed,
-            //     self.max_step
-            // );
-            self.emulator.set_max_step(self.max_step);
         }
 
         let status = loop {

@@ -131,30 +131,15 @@ impl ProcessorState {
         self.generation
     }
 
-    /// Returns the general-purpose register at the specified index.
-    #[inline]
-    pub fn gpr(&self, index: GprIndex32) -> &GeneralPurposeRegister {
-        self.runtime(index.into())
-    }
-
     /// Returns the runtime register at the specified index.
     #[inline]
-    pub fn runtime(&self, index: RtReg) -> &GeneralPurposeRegister {
+    pub fn reg(&self, index: RtReg) -> &GeneralPurposeRegister {
         &self.gpr[index as usize]
     }
 
+    /// Returns a partial register (8-bit) at the specified index.
     #[inline]
-    pub fn gpr16<'a>(&'a self, index: GprIndex16) -> Gpr16<'a> {
-        self.gpr(index.upgrade()).w()
-    }
-
-    #[inline]
-    pub fn gpr8<'a>(&'a self, index: GprIndex8) -> Gpr8<'a> {
-        self.rt8(index.into())
-    }
-
-    #[inline]
-    pub fn rt8<'a>(&'a self, index: RtReg8) -> Gpr8<'a> {
+    pub fn reg8<'a>(&'a self, index: RtReg8) -> Gpr8<'a> {
         match index {
             RtReg8::AL => self.al(),
             RtReg8::CL => self.cl(),
@@ -164,7 +149,7 @@ impl ProcessorState {
             RtReg8::CH => self.ch(),
             RtReg8::DH => self.dh(),
             RtReg8::BH => self.bh(),
-            RtReg8::MemData => self.runtime(RtReg::MemData).l(),
+            RtReg8::MemData => self.reg(RtReg::MemData).l(),
         }
     }
 
@@ -182,127 +167,127 @@ impl ProcessorState {
 
     #[inline]
     pub fn al<'a>(&'a self) -> Gpr8<'a> {
-        self.gpr(EAX).l()
+        self.reg(RtReg::EAX).l()
     }
 
     #[inline]
     pub fn ah<'a>(&'a self) -> Gpr8<'a> {
-        self.gpr(EAX).h()
+        self.reg(RtReg::EAX).h()
     }
 
     #[inline]
     pub fn ax<'a>(&'a self) -> Gpr16<'a> {
-        self.gpr(EAX).x()
+        self.reg(RtReg::EAX).x()
     }
 
     #[inline]
     pub fn eax<'a>(&'a self) -> Gpr32<'a> {
-        self.gpr(EAX).e()
+        self.reg(RtReg::EAX).e()
     }
 
     #[inline]
     pub fn bl<'a>(&'a self) -> Gpr8<'a> {
-        self.gpr(EBX).l()
+        self.reg(RtReg::EBX).l()
     }
 
     #[inline]
     pub fn bh<'a>(&'a self) -> Gpr8<'a> {
-        self.gpr(EBX).h()
+        self.reg(RtReg::EBX).h()
     }
 
     #[inline]
     pub fn bx<'a>(&'a self) -> Gpr16<'a> {
-        self.gpr(EBX).x()
+        self.reg(RtReg::EBX).x()
     }
 
     #[inline]
     pub fn ebx<'a>(&'a self) -> Gpr32<'a> {
-        self.gpr(EBX).e()
+        self.reg(RtReg::EBX).e()
     }
 
     #[inline]
     pub fn cl<'a>(&'a self) -> Gpr8<'a> {
-        self.gpr(ECX).l()
+        self.reg(RtReg::ECX).l()
     }
 
     #[inline]
     pub fn ch<'a>(&'a self) -> Gpr8<'a> {
-        self.gpr(ECX).h()
+        self.reg(RtReg::ECX).h()
     }
 
     #[inline]
     pub fn cx<'a>(&'a self) -> Gpr16<'a> {
-        self.gpr(ECX).x()
+        self.reg(RtReg::ECX).x()
     }
 
     #[inline]
     pub fn ecx<'a>(&'a self) -> Gpr32<'a> {
-        self.gpr(ECX).e()
+        self.reg(RtReg::ECX).e()
     }
 
     #[inline]
     pub fn dl<'a>(&'a self) -> Gpr8<'a> {
-        self.gpr(EDX).l()
+        self.reg(RtReg::EDX).l()
     }
 
     #[inline]
     pub fn dh<'a>(&'a self) -> Gpr8<'a> {
-        self.gpr(EDX).h()
+        self.reg(RtReg::EDX).h()
     }
 
     #[inline]
     pub fn dx<'a>(&'a self) -> Gpr16<'a> {
-        self.gpr(EDX).x()
+        self.reg(RtReg::EDX).x()
     }
 
     #[inline]
     pub fn edx<'a>(&'a self) -> Gpr32<'a> {
-        self.gpr(EDX).e()
+        self.reg(RtReg::EDX).e()
     }
 
     #[inline]
     pub fn sp<'a>(&'a self) -> Gpr16<'a> {
-        self.gpr(ESP).x()
+        self.reg(RtReg::ESP).x()
     }
 
     #[inline]
     pub fn esp<'a>(&'a self) -> Gpr32<'a> {
-        self.gpr(ESP).e()
+        self.reg(RtReg::ESP).e()
     }
 
     #[inline]
     pub fn bp<'a>(&'a self) -> Gpr16<'a> {
-        self.gpr(EBP).x()
+        self.reg(RtReg::EBP).x()
     }
 
     #[inline]
     pub fn ebp<'a>(&'a self) -> Gpr32<'a> {
-        self.gpr(EBP).e()
+        self.reg(RtReg::EBP).e()
     }
 
     #[inline]
     pub fn si<'a>(&'a self) -> Gpr16<'a> {
-        self.gpr(ESI).x()
+        self.reg(RtReg::ESI).x()
     }
 
     #[inline]
     pub fn esi<'a>(&'a self) -> Gpr32<'a> {
-        self.gpr(ESI).e()
+        self.reg(RtReg::ESI).e()
     }
 
     #[inline]
     pub fn di<'a>(&'a self) -> Gpr16<'a> {
-        self.gpr(EDI).x()
+        self.reg(RtReg::EDI).x()
     }
 
     #[inline]
     pub fn edi<'a>(&'a self) -> Gpr32<'a> {
-        self.gpr(EDI).e()
+        self.reg(RtReg::EDI).e()
     }
 
     #[inline]
     pub fn eip<'a>(&'a self) -> Gpr32<'a> {
-        self.runtime(RtReg::EIP).e()
+        self.reg(RtReg::EIP).e()
     }
 
     #[inline]
