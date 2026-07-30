@@ -20,7 +20,7 @@ import blissImage from './assets/bliss.png';
 
 type WindowId = string;
 type AppId = string;
-type WindowKind = 'canvas' | 'terminal' | 'filemanager' | 'about' | 'textviewer' | 'onboarding';
+type WindowKind = 'canvas' | 'terminal' | 'filemanager' | 'about' | 'textviewer' | 'onboarding' | 'systemmodal';
 
 declare const __APP_VERSION__: string;
 declare const __GIT_HASH__: string;
@@ -177,6 +177,7 @@ const APP_IDS = {
   ABOUT: '88a37a04-c8e5-42e6-9f13-2f7fd31f62c3',
   TEXT_VIEWER: 'e97b8139-cebf-40cd-8805-a0b87192c50f',
   ONBOARDING: 'd1b3e8f4-7a2e-4c9d-b5f1-9a8c6d2e4f3b',
+  SYSTEM_MODAL: 'a2c9f5d3-1e8b-4a7c-9d2f-5b3e8c1a6d7f',
 } as const;
 
 // USB HID Keyboard modifier bits
@@ -515,6 +516,8 @@ const tasksSkipDefaultTerminalFallback = new Set<WindowId>();
 let fileManagerWindowId: WindowId | null = null;
 let aboutWindowId: WindowId | null = null;
 let onboardingWindowId: WindowId | null = null;
+let systemModalWindowId: WindowId | null = null;
+const systemModalModeByWindowId = new Map<WindowId, { mode: 'import' | 'complete'; filename?: string; error?: string }>();
 const textViewerWindowByFilename = new Map<string, WindowId>();
 let lastFileManagerPosition: { x: number; y: number } | null = null;
 
@@ -842,13 +845,11 @@ const persistFileSystem = (): void => {
   try {
     localStorage.setItem(FILE_STORAGE_KEY, serialized);
   } catch {
-    emitGlobalTerminalLine('Filesystem save failed: localStorage quota exceeded.');
     return;
   }
 
   if (serializedSize > FILE_STORAGE_WARNING_BYTES) {
     const warning = `Warning: filesystem uses ${serializedSize} bytes (> ${FILE_STORAGE_WARNING_BYTES} bytes).`;
-    emitGlobalTerminalLine(warning);
     console.warn(warning);
     if (!hasShownStorageWarning) {
       hasShownStorageWarning = true;
@@ -1360,6 +1361,12 @@ const closeWindow = (id: WindowId): void => {
   // Clear onboarding window ID if it was closed
   if (onboardingWindowId === id) {
     onboardingWindowId = null;
+  }
+
+  // Clear system modal window ID if it was closed
+  if (systemModalWindowId === id) {
+    systemModalWindowId = null;
+    systemModalModeByWindowId.delete(id);
   }
 
   // Clear text viewer window IDs if they were closed
@@ -2839,13 +2846,32 @@ const renderWindows = (): void => {
 
   desktop.textContent = '';
 
+  // Check if system modal exists
+  const systemModalWindow = state.windows.find(win => win.kind === 'systemmodal');
+
+  // If system modal exists, add overlay
+  if (systemModalWindow) {
+    const overlay = document.createElement('div');
+    overlay.className = 'system-modal-overlay';
+    overlay.style.zIndex = String(systemModalWindow.zIndex - 1);
+    desktop.appendChild(overlay);
+  }
+
   const sortedWindows = [...state.windows].sort((a, b) => a.zIndex - b.zIndex);
   for (const win of sortedWindows) {
     const frame = document.createElement('article');
-    frame.className = 'window-frame';
-    if (win.isActive) {
+
+    // Apply different class for system modal
+    if (win.kind === 'systemmodal') {
+      frame.className = 'system-modal-frame';
       frame.classList.add('window-frame-active');
+    } else {
+      frame.className = 'window-frame';
+      if (win.isActive) {
+        frame.classList.add('window-frame-active');
+      }
     }
+
     frame.dataset.windowId = win.id;
     frame.style.left = `${win.x}px`;
     frame.style.top = `${win.y}px`;
@@ -2861,49 +2887,70 @@ const renderWindows = (): void => {
       bringToFrontIfNeeded(win.id);
     });
 
-    const titleBar = document.createElement('header');
-    titleBar.className = 'window-titlebar';
-    titleBar.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0) {
-        return;
-      }
+    // Only render titlebar if not system modal
+    if (win.kind !== 'systemmodal') {
+      const titleBar = document.createElement('header');
+      titleBar.className = 'window-titlebar';
+      titleBar.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0) {
+          return;
+        }
 
-      bringToFrontIfNeeded(win.id);
+        bringToFrontIfNeeded(win.id);
 
-      const latestWindow = findWindowById(win.id);
-      if (!latestWindow) {
-        return;
-      }
+        const latestWindow = findWindowById(win.id);
+        if (!latestWindow) {
+          return;
+        }
 
-      startDrag(event, latestWindow);
-      event.preventDefault();
-    });
+        startDrag(event, latestWindow);
+        event.preventDefault();
+      });
 
-    const title = document.createElement('span');
-    title.className = 'window-title';
-    title.textContent = win.title;
+      const title = document.createElement('span');
+      title.className = 'window-title';
+      title.textContent = win.title;
 
-    const icon = document.createElement('span');
-    icon.className = 'window-icon';
-    icon.innerHTML = getWindowIconSvg(win.kind);
+      const icon = document.createElement('span');
+      icon.className = 'window-icon';
+      icon.innerHTML = getWindowIconSvg(win.kind);
 
-    const closeButton = document.createElement('button');
-    closeButton.className = 'window-close-button';
-    closeButton.type = 'button';
-    closeButton.innerHTML = iconClose;
-    closeButton.setAttribute('aria-label', `Close ${win.title}`);
-    closeButton.addEventListener('pointerdown', (event) => {
-      event.stopPropagation();
-      event.preventDefault();
-      closeWindow(win.id);
-    });
-    closeButton.addEventListener('click', (event) => {
-      event.stopPropagation();
-      closeWindow(win.id);
-    });
+      const closeButton = document.createElement('button');
+      closeButton.className = 'window-close-button';
+      closeButton.type = 'button';
+      closeButton.innerHTML = iconClose;
+      closeButton.setAttribute('aria-label', `Close ${win.title}`);
+      closeButton.addEventListener('pointerdown', (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        closeWindow(win.id);
+      });
+      closeButton.addEventListener('click', (event) => {
+        event.stopPropagation();
+        closeWindow(win.id);
+      });
 
-    titleBar.append(icon, title, closeButton);
-    frame.append(titleBar);
+      titleBar.append(icon, title, closeButton);
+      frame.append(titleBar);
+    } else {
+      // System modal: render close button in top-right corner
+      const closeButton = document.createElement('button');
+      closeButton.className = 'system-modal-close-button';
+      closeButton.type = 'button';
+      closeButton.innerHTML = iconClose;
+      closeButton.setAttribute('aria-label', 'Close');
+      closeButton.addEventListener('pointerdown', (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        closeWindow(win.id);
+      });
+      closeButton.addEventListener('click', (event) => {
+        event.stopPropagation();
+        closeWindow(win.id);
+      });
+      frame.append(closeButton);
+    }
+
     if (win.kind === 'terminal') {
       frame.append(createTerminalPanel(win));
     } else if (win.kind === 'filemanager') {
@@ -2912,6 +2959,8 @@ const renderWindows = (): void => {
       frame.append(createAboutPanel(win));
     } else if (win.kind === 'onboarding') {
       frame.append(createOnboardingPanel(win));
+    } else if (win.kind === 'systemmodal') {
+      frame.append(createSystemModalPanel(win));
     } else if (win.kind === 'textviewer') {
       frame.append(createTextViewerPanel(win));
     } else {
@@ -2939,7 +2988,7 @@ const renderWindows = (): void => {
   window.scrollTo(scrollX, scrollY);
 };
 
-const importDroppedFiles = async (files: FileList): Promise<void> => {
+const importDroppedFiles = async (files: FileList): Promise<{ ok: boolean; filename?: string; error?: string }> => {
   // Calculate total size of existing files
   let existingFilesSize = 0;
   for (const entry of fileSystem.values()) {
@@ -2962,47 +3011,132 @@ const importDroppedFiles = async (files: FileList): Promise<void> => {
     const existingMiB = (existingFilesSize / (1024 * 1024)).toFixed(2);
     const importMiB = (importFilesSize / (1024 * 1024)).toFixed(2);
     const limitMiB = (FILE_IMPORT_SIZE_LIMIT_BYTES / (1024 * 1024)).toFixed(1);
-    const errorMessage = `ファイルの取り込みに失敗しました: 合計サイズ (${existingMiB} MiB + ${importMiB} MiB) が ${limitMiB} MiB の制限を超えています`;
-    showErrorDialog(errorMessage);
-    return;
+    const errorMessage = `合計サイズ (${existingMiB} MiB + ${importMiB} MiB) が ${limitMiB} MiB の制限を超えています`;
+    return { ok: false, error: errorMessage };
   }
 
-  const results: string[] = [];
+  let firstFileName: string | null = null;
 
   for (const { file, content } of fileContents) {
     const sourceName = normalizePathLikeName(file.webkitRelativePath || file.name);
     const result = upsertFile(sourceName, content);
     if (!result.ok) {
-      results.push(result.reason);
       continue;
     }
 
-    results.push(`Imported ${result.name} (${formatBytes(content.byteLength)})\n`);
-  }
-
-  for (const message of results) {
-    emitGlobalTerminalLine(message);
+    if (!firstFileName) {
+      firstFileName = result.name;
+    }
   }
 
   // ファイルマネージャが開いている場合は再レンダリング
   if (fileManagerWindowId !== null) {
     renderWindows();
   }
+
+  // Return success if at least one file was imported
+  if (firstFileName) {
+    return { ok: true, filename: firstFileName };
+  }
+
+  return { ok: false, error: '取り込み可能なファイルがありません' };
 };
 
-desktop.addEventListener('dragover', (event) => {
-  event.preventDefault();
-});
+// Track if modal has been created during this drag operation
+let modalCreated = false;
 
-desktop.addEventListener('drop', (event) => {
+// Use window-level listeners with capture phase to intercept drag events early
+window.addEventListener('dragenter', (event) => {
   event.preventDefault();
+  event.stopPropagation();
+
+  // Create modal if not already created, or if previous modal was closed
+  if (!modalCreated || !systemModalWindowId || !findWindowById(systemModalWindowId)) {
+    createSystemModalWindow('import');
+    modalCreated = true;
+  }
+}, { capture: true });
+
+window.addEventListener('dragover', (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+
+  // Ensure modal exists on drag over (in case it was closed)
+  if (!modalCreated || !systemModalWindowId || !findWindowById(systemModalWindowId)) {
+    createSystemModalWindow('import');
+    modalCreated = true;
+  }
+
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'copy';
+  }
+}, { capture: true });
+
+window.addEventListener('dragleave', (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  // Only close modal if drag completely leaves the window
+  const clientX = (event as DragEvent).clientX;
+  const clientY = (event as DragEvent).clientY;
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+
+  if (clientX < 0 || clientX >= viewportWidth || clientY < 0 || clientY >= viewportHeight) {
+    modalCreated = false;
+    if (systemModalWindowId) {
+      closeWindow(systemModalWindowId);
+    }
+  }
+}, { capture: true });
+
+window.addEventListener('drop', (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  modalCreated = false;
+
   const files = event.dataTransfer?.files;
+
   if (!files || files.length === 0) {
+    // Hide modal on failed drop
+    if (systemModalWindowId && findWindowById(systemModalWindowId)) {
+      closeWindow(systemModalWindowId);
+    }
     return;
   }
 
-  void importDroppedFiles(files);
-});
+  // Create a copy of files array to ensure it's accessible in async context
+  const fileArray = Array.from(files);
+
+  // Import files asynchronously
+  void (async () => {
+    const fileList = {
+      length: fileArray.length,
+      item(index: number) {
+        return fileArray[index] || null;
+      },
+      [Symbol.iterator]: function* () {
+        yield* fileArray;
+      },
+    } as unknown as FileList;
+
+    const result = await importDroppedFiles(fileList);
+
+    // Update modal to mode 2 (complete) with result
+    if (systemModalWindowId && findWindowById(systemModalWindowId)) {
+      if (result.ok) {
+        // Success: show filename
+        systemModalModeByWindowId.set(systemModalWindowId, { mode: 'complete', filename: result.filename });
+      } else {
+        // Error: show error message
+        systemModalModeByWindowId.set(systemModalWindowId, { mode: 'complete', error: result.error });
+      }
+      renderWindows();
+    }
+  })();
+}, { capture: true });
+
+// Note: Do NOT block drag events at document level
+// Let them propagate to desktop element handlers for processing
 
 const focusFileManagerList = (windowId: WindowId): void => {
   const list = desktop.querySelector<HTMLDivElement>(`[data-file-manager-list-window-id="${windowId}"]`);
@@ -3167,6 +3301,105 @@ const createOnboardingWindow = (): void => {
 
   onboardingWindowId = id;
   state.nextZIndex += 1;
+  state.activeWindowId = id;
+  createWindowModel(windowModel);
+  renderWindows();
+};
+
+const createSystemModalPanel = (win: WindowModel): HTMLElement => {
+  const panel = document.createElement('section');
+  panel.className = 'system-modal-panel';
+
+  const content = document.createElement('div');
+  content.className = 'system-modal-content';
+
+  const modalMode = systemModalModeByWindowId.get(win.id);
+  const mode = modalMode?.mode || 'import';
+  const filename = modalMode?.filename;
+  const error = modalMode?.error;
+
+  // Mode 1: Import (no title, no OK button)
+  if (mode === 'import') {
+    const message = document.createElement('p');
+    message.className = 'system-modal-message system-modal-message-import';
+    message.textContent = 'ここにファイルをドロップすると取り込めます。';
+    content.appendChild(message);
+  } else {
+    // Mode 2: Complete or Error (title not shown, but message and OK button)
+    // Add spacer for visual balance
+    const spacer = document.createElement('div');
+    spacer.className = 'system-modal-spacer';
+    content.appendChild(spacer);
+
+    const message = document.createElement('p');
+    message.className = 'system-modal-message system-modal-message-complete';
+    if (error) {
+      // Error message
+      message.textContent = `取り込みに失敗しました: ${error}`;
+    } else if (filename) {
+      // Success message
+      message.textContent = `${filename} を取り込みました。`;
+    } else {
+      // Fallback
+      message.textContent = 'ファイルを取り込みました。';
+    }
+    content.appendChild(message);
+
+    const buttonContainer = document.createElement('div');
+    buttonContainer.className = 'system-modal-button-container';
+
+    const okButton = document.createElement('button');
+    okButton.type = 'button';
+    okButton.className = 'system-modal-button';
+    okButton.textContent = 'OK';
+    okButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      closeWindow(win.id);
+    });
+
+    buttonContainer.appendChild(okButton);
+    content.appendChild(buttonContainer);
+  }
+
+  panel.appendChild(content);
+
+  return panel;
+};
+
+const createSystemModalWindow = (mode: 'import' | 'complete' = 'import', filename?: string): void => {
+  // If system modal already exists, update mode and bring to front
+  if (systemModalWindowId && findWindowById(systemModalWindowId)) {
+    systemModalModeByWindowId.set(systemModalWindowId, { mode, filename });
+    bringToFrontIfNeeded(systemModalWindowId);
+    renderWindows();
+    return;
+  }
+
+  const id = createWindowId();
+  const centered = getCenteredWindowPosition(480, mode === 'import' ? 200 : 240);
+
+  // Calculate maximum z-index from all other windows
+  let maxZIndex = 0;
+  for (const win of state.windows) {
+    maxZIndex = Math.max(maxZIndex, win.zIndex);
+  }
+
+  const windowModel: WindowModel = {
+    id,
+    appId: APP_IDS.SYSTEM_MODAL,
+    kind: 'systemmodal',
+    title: '',
+    x: centered.x,
+    y: centered.y,
+    width: 480,
+    height: mode === 'import' ? 200 : 240,
+    zIndex: maxZIndex + 100, // Very high z-index for system modal
+    isActive: true,
+  };
+
+  systemModalModeByWindowId.set(id, { mode, filename });
+  systemModalWindowId = id;
+  state.nextZIndex = Math.max(state.nextZIndex, maxZIndex + 101);
   state.activeWindowId = id;
   createWindowModel(windowModel);
   renderWindows();
