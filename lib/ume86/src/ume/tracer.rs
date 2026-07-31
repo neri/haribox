@@ -689,6 +689,9 @@ impl TraceDecoder {
                 IrOp::REP_MOVSB(_sr, _a32) => {
                     self.uop_cache.push(Uop::Minor(UopMinor::RepMovsb));
                 }
+                IrOp::REP_MOVSD(_sr, _a32) => {
+                    self.uop_cache.push(Uop::Minor(UopMinor::RepMovsd));
+                }
                 IrOp::REP_STOSD(_sr, _a32) => {
                     self.uop_cache.push(Uop::Minor(UopMinor::RepStosd));
                 }

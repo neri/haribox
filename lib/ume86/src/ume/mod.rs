@@ -963,6 +963,25 @@ impl UME {
                             self.state.ecx().write(ecx);
                         }
                     }
+                    UopMinor::RepMovsd => {
+                        let mut ecx = self.state.ecx().read();
+                        if ecx > 0 {
+                            let mut esi = self.state.esi().read();
+                            let mut edi = self.state.edi().read();
+
+                            while ecx > 0 {
+                                let value = self.read_memory32(esi)?;
+                                self.write_memory32(edi, value)?;
+                                esi = esi.wrapping_add(4);
+                                edi = edi.wrapping_add(4);
+                                ecx = ecx.wrapping_sub(1);
+                            }
+
+                            self.state.esi().write(esi);
+                            self.state.edi().write(edi);
+                            self.state.ecx().write(ecx);
+                        }
+                    }
                     UopMinor::RepStosd => {
                         let mut ecx = self.state.ecx().read();
                         if ecx > 0 {

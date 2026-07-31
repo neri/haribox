@@ -2319,7 +2319,9 @@ const createOnboardingPanel = (win: WindowModel): HTMLElement => {
   // Description
   const description = document.createElement('p');
   description.className = 'onboarding-description';
-  description.innerHTML = '<a href="http://hrb.osask.jp/" target="_blank" rel="noopener noreferrer">はりぼてOS</a> のアプリをブラウザー上で実行できるデスクトップ環境エミュレーターです。<br>ベータ運用中です。外部のアプリはうまく動作しない場合があります。';
+  description.innerHTML = `<a href="http://hrb.osask.jp/" target="_blank" rel="noopener noreferrer">はりぼてOS</a> のアプリをブラウザー上で実行できるデスクトップ環境エミュレーターです。<br>
+現在ベータ運用中です。<br>
+内蔵アプリは概ね検証済みですが、外部のアプリはうまく動作しない場合があります。`;
   contentContainer.appendChild(description);
 
   // Features list

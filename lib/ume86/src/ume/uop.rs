@@ -297,6 +297,7 @@ pub enum UopMinor {
 
     /// Repeat Move String (Byte)
     RepMovsb,
+    RepMovsd,
 
     /// Repeat Store String (Byte)
     RepStosd,
