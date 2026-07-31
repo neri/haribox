@@ -801,15 +801,6 @@ const getStoredFileSystemV1 = (): StoredFileSystemV1 => {
   };
 };
 
-const emitGlobalTerminalLine = (message: string): void => {
-  for (const windowId of terminalOutputByWindow.keys()) {
-    const current = terminalOutputByWindow.get(windowId) ?? [];
-    current.push(message);
-    terminalOutputByWindow.set(windowId, current);
-    syncTerminalView(windowId);
-  }
-};
-
 const applyInitialFiles = (): void => {
   for (const entry of INITIAL_FS_ENTRIES) {
     const compressed = fromBase64(entry.contentBase64);
