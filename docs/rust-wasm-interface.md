@@ -126,17 +126,19 @@ Rust 側は以下の JavaScript 関数を `#[wasm_bindgen(module = "env")]` 経�
   - 起動引数：`terminalWindowId`、`fileName`、`commandLine`、`titleBarHeight`、`fileSystemSnapshot`、`environmentVariables`
   - `titleBarHeight`: UI の `TITLE_BAR_HEIGHT` 定数値（通常 32px）
 
-- `keyboardEvent(eventType, key, code, keyCode, ctrlKey, shiftKey, altKey, metaKey, isAutoRepeat)`
+- `keyboardEvent(windowId, eventType, key, code, keyCode, ctrlKey, shiftKey, altKey, metaKey, isAutoRepeat, modifierBitmap)`
   - Canvas ウィンドウがアクティブ時、キーボード入力イベントを Worker に転送
   - Main スレッドで Canvas ウィンドウの keydown/keyup イベントを捕捉し、アクティブウィンドウ判定後に転送
   - パラメータ:
-    - `eventType`: 'keydown' | 'keyup' | 'keypress'
+    - `windowId`: 入力先CanvasウィンドウのUI UUID
+    - `eventType`: 'keydown' | 'keyup'
     - `key`: キーの文字表現 (e.g., 'a', 'Enter', 'ArrowUp')
     - `code`: キーボード位置コード (e.g., 'KeyA', 'Enter', 'ArrowUp')
     - `keyCode`: 数値キーコード（廃止予定だが互換性のため含める）
     - `ctrlKey`, `shiftKey`, `altKey`, `metaKey`: 修飾キー状態（boolean）
     - `isAutoRepeat`: キーホールド時の自動リピート状態（boolean）
-  - Worker は受け取ったイベント情報をログ出力（将来：Rust FFI 経由で Rust タスクに転送予定）
+    - `modifierBitmap`: 左右を区別するUSB HID形式の修飾キー状態
+  - Worker は `keydown` をイベントコードへ変換してキューに追加する。`keyup` はキューへ追加しない
   - Canvas ウィンドウ以外がアクティブの場合、転送されない
 
 - `updateFileSystemSnapshot(fileSystemSnapshot)`
@@ -191,12 +193,14 @@ Rust 側は以下の JavaScript 関数を `#[wasm_bindgen(module = "env")]` 経�
     - Worker を終了
     - ユーザーへのエラー通知
 
-- `fileWritten(filename)`
+- `fileWritten(filename, data, mode)`
   - Worker が `js_write_file` でファイルを書き込んだ際、Main へ通知
   - パラメータ:
     - `filename`: 書き込みされたファイル名
+    - `data`: 書き込み内容の `ArrayBuffer`
+    - `mode`: `update` / `create` / `upsert`
   - Main の処理:
-    - ファイルシステムを更新して localStorage へ永続化
+    - `mode` を検証してファイルシステムを更新し、localStorage へ永続化
     - 複数 Worker 同時実行時は、全 Worker に `updateFileSystemSnapshot` メッセージで配信
 
 - `println(windowId, text)`
@@ -256,7 +260,8 @@ Rust 側は以下の JavaScript 関数を `#[wasm_bindgen(module = "env")]` 経�
        shiftKey: false,
        altKey: false,
        metaKey: false,
-       isAutoRepeat: false
+       isAutoRepeat: false,
+       modifierBitmap: 0
      }
      ```
    - `event.preventDefault()` でブラウザのデフォルト動作を抑止
@@ -268,27 +273,14 @@ Rust 側は以下の JavaScript 関数を `#[wasm_bindgen(module = "env")]` 経�
    - `handleKeyboardEvent()` 関数を呼び出し
 
 6. **Worker スレッド - イベント処理**：
-   - `keydown` イベント時のみ処理（`keyup` は TBD）
-   - イベント UUID をキーから対応する numeric window ID を逆引き
-   - `key` プロパティが単一文字かつ ASCII 印字文字（0x20-0x7E）か判定
-   - 有効な場合、文字の charCode（ASCIIコード）をイベントキューにエンキュー
-   - コンソール出力でログ:
-     ```
-     [worker] Enqueued event code 97 (keydown - a) to window 1
-     ```
-   - 特殊キー（エンター、矢印キーなど）は現在スキップ
+   - `keydown` のみをイベントキューに追加し、`keyup` は追加しない
+   - 印字可能ASCII文字（`0x20`～`0x7e`）は文字コードを追加する
+   - Backspace、Enter、Esc、PageUp/PageDown、Home/End、矢印、Insert、Delete は定義済みの特殊キーコードを追加する
+   - `modifierBitmap` を上位8ビットにエンコードする。ビットの対応は後述の「イベントコード形式」を参照
 
-7. **将来の拡張**：
-   - 特殊キーのコード割り当て（TBD）
-   - `keyup` イベントの処理方法（TBD）
-   - 修飾キー（Ctrl, Shift, Alt, Meta）の処理方法（TBD）
-
-#### 修飾キーの例
-
-- 単独キー: `key='a', code='KeyA'` → `"a"`
-- Ctrl+A: `key='a', code='KeyA', ctrlKey=true` → `"Ctrl+a"`
-- Shift+A: `key='A', code='KeyA', shiftKey=true` → `"Shift+A"`
-- Ctrl+Shift+A: `ctrlKey=true, shiftKey=true` → `"Ctrl+Shift+A"`
+7. **Rust タスク - イベント取得**：
+   - Rust タスクは `js_get_keyboard_event(window_id)` を呼び、Workerのグローバルキューから次のイベントを取得する
+   - `window_id` は互換性のための引数であり、キューの選択には使用しない
 
 #### 非 Canvas ウィンドウ時の挙動
 
@@ -310,12 +302,26 @@ Worker は 1 つのグローバルなイベントキューを管理し、すべ�
 **イベントコード形式**:
 - **文字キー**（`keydown` イベント）: ASCIIコード（0x20-0x7E）
   - 例: `'a'` → 97, `'A'` → 65, `'Z'` → 90, `' '` (スペース) → 32, `'0'` → 48
-  - Main が `keydown` イベント受信時に `key` プロパティから判定
-  - Worker が charCode 変換して enqueue
-- **特殊キー**（矢印、Esc、Enter など）: TBD（予約済み、未定義）
-  - 将来的に数値コード割り当て予定
-  - 現在は処理対象外（キューにエンキューされない）
-- **キューが空**: Rust 呼び出し時に 0 を返却
+- **特殊キー**（`keydown` イベント）:
+
+  | キー | コード |
+  |------|-------:|
+  | Backspace | `0x08` |
+  | Enter | `0x0a` |
+  | Escape | `0x1b` |
+  | PageUp / PageDown | `0x80` / `0x81` |
+  | End / Home | `0x82` / `0x83` |
+  | ArrowLeft / ArrowRight | `0x84` / `0x85` |
+  | ArrowUp / ArrowDown | `0x86` / `0x87` |
+  | Insert / Delete | `0x88` / `0x89` |
+
+- **修飾キー**: `modifierBitmap` をHaribote形式に変換し、イベントコードのビット8～15へ格納する。左Shift/Ctrl/Alt/Metaはビット8～11、右Shift/Ctrl/Alt/Metaはビット12～15に対応する
+- **`keyup`**: Workerへは転送されるが、イベントコードは追加しない
+- **キューが空**: Rust 呼び出し時に `-1` を返却
+
+**Haribote OS API への変換**:
+- 通常の `api_getkey` はイベントコードの下位8ビットを利用する。ArrowLeft/Right/Up/Down はそれぞれ `0x34` / `0x36` / `0x38` / `0x32` へ変換し、その他の `0x80` 以上の特殊キーは無効値として扱う
+- 拡張 `api_getkeyEx` は修飾キーを含むイベントコード全体を返す
 
 #### イベントキューへのアクセス
 
@@ -328,7 +334,7 @@ if event_code > 0 {
     let ch = event_code as u8 as char;  // ASCIIコード → 文字
     println!("User pressed: {}", ch);
 } else {
-    // キューが空、または特殊キー（未実装）
+    // キューが空
 }
 ```
 
@@ -337,9 +343,8 @@ if event_code > 0 {
 1. Main スレッドが `keydown` イベントをキャッチ
 2. Canvas ウィンドウのアクティブ判定後、Worker に `keyboardEvent` メッセージ送信
 3. Worker が `handleKeyboardEvent()` で:
-   - イベント UUID から numeric window ID を逆引き
-   - `key` が単一文字の ASCII 印字文字（0x20-0x7E）か判定
-   - 有効な場合、charCode をイベントキューにエンキュー
+   - 印字可能ASCII文字または定義済み特殊キーをイベントコードへ変換
+   - 修飾キー情報を上位ビットへエンコードし、グローバルキューに追加
 4. Rust タスクが定期的に `js_get_keyboard_event(window_id)` を呼び出し
 5. Worker が キューから次のイベントコードをデキューして返却
 6. Rust タスクがコードを処理（表示、入力処理など）

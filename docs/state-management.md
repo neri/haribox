@@ -72,7 +72,7 @@ const APP_IDS = {
 |--------|-----|------|
 | `TASKBAR_HEIGHT_PX` | 48 | タスクバーの高さ |
 | `TERMINAL_WINDOW_OFFSET_STEP` | 24 | 新規端末ウィンドウのカスケード配置オフセット |
-| `TERMINAL_MAX_LINES` | 1000 | ターミナルのスクロールバッファ最大行数 |
+| `TERMINAL_MAX_LINES` | 4000 | ターミナルのスクロールバッファ最大行数 |
 | `TITLE_BAR_HEIGHT` | 32 | ウィンドウのタイトルバーの高さ |
 | `Z_INDEX_REFRESH_THRESHOLD` | 10,000 | Z インデックス最適化の閾値 |
 | `INITIAL_TERMINAL_WINDOW_HEIGHT` | 320 | 初期端末ウィンドウの高さ |

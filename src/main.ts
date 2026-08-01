@@ -112,7 +112,7 @@ type WorkerCommand =
   | { type: 'drawImage'; windowId: string; x: number; y: number; width: number; height: number; pixels: ArrayBuffer }
   | { type: 'print'; windowId: string; text: string }
   | { type: 'println'; windowId: string; text: string }
-  | { type: 'writeFile'; filename: string; data: ArrayBuffer; mode: WriteFileMode }
+  | { type: 'fileWritten'; filename: string; data: ArrayBuffer; mode: WriteFileMode }
   | { type: 'playSound'; workerId: string; frequency: number; timestamp: number }
   | { type: 'error'; message: string }
   | { type: 'done' };
@@ -1301,6 +1301,10 @@ const openRustWindow = (windowId: WindowId, width: number, height: number, title
 const closeWindow = (id: WindowId): void => {
   // Notify Worker if closing a Canvas window
   const closingWindow = findWindowById(id);
+  if (!closingWindow) {
+    return;
+  }
+
   if (closingWindow && closingWindow.kind === 'canvas') {
     const worker = workerByWindowId.get(id);
     if (worker) {
@@ -1371,18 +1375,25 @@ const closeWindow = (id: WindowId): void => {
 
   if (remainingWindows.length === 0) {
     state.windows = [];
+    state.activeWindowId = null;
     renderWindows();
     return;
   }
 
-  const topWindow = remainingWindows.reduce((top, current) => {
-    return current.zIndex > top.zIndex ? current : top;
-  });
+  const currentActiveStillExists = state.activeWindowId !== id
+    && state.activeWindowId !== null
+    && remainingWindows.some((item) => item.id === state.activeWindowId);
+  const nextActiveWindowId = currentActiveStillExists
+    ? state.activeWindowId
+    : remainingWindows.reduce((top, current) => {
+      return current.zIndex > top.zIndex ? current : top;
+    }).id;
 
   state.windows = remainingWindows.map((item) => ({
     ...item,
-    isActive: item.id === topWindow.id,
+    isActive: item.id === nextActiveWindowId,
   }));
+  state.activeWindowId = nextActiveWindowId;
 
   renderWindows();
 };
@@ -1878,7 +1889,7 @@ const handleWorkerCommand = (command: WorkerCommand, worker?: Worker): void => {
         // Ultimate fallback: to do nothing for now
       }
       return;
-    case 'writeFile': {
+    case 'fileWritten': {
       const normalizedResult = normalizeFileName(command.filename);
       if (!normalizedResult.ok) {
         return;
@@ -2333,7 +2344,7 @@ const createOnboardingPanel = (win: WindowModel): HTMLElement => {
     'ファイル一覧から HRB ファイルを選択してGUIアプリを実行できます。',
     '一部のアプリはターミナルでコマンド入力が必要なものがあります。',
     'ターミナルでは HELP コマンドで使用可能なコマンドを確認できます。',
-    'ドラッグアンドドロップで外部の HRB ファイルを取り込めます。',
+    'ドラッグアンドドロップで外部の HRB ファイルを localStorage に取り込めます。',
   ];
 
   featuresList.forEach(feature => {

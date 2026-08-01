@@ -502,6 +502,8 @@ const createWasmEnv = (): WasmEnv => {
             post({
                 type: 'fileWritten',
                 filename,
+                data: data.buffer,
+                mode,
             });
 
             return 0; // Success

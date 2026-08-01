@@ -179,6 +179,8 @@ pub enum Uop {
     AndR8(RtReg8, RtReg8),
     /// And Register Values (16-bit)
     AndR16(RtReg, RtReg),
+    /// And Register Value and Memory Value (Read-Modify-Write)
+    AndRMW(RtReg, RtReg),
 
     /// Or Register and Immediate Value
     OrI(RtReg, u32),
@@ -192,6 +194,8 @@ pub enum Uop {
     OrR8(RtReg8, RtReg8),
     /// Or Register Values (16-bit)
     OrR16(RtReg, RtReg),
+    /// Or Register Value and Memory Value (Read-Modify-Write)
+    OrRMW(RtReg, RtReg),
 
     /// Xor Register and Immediate Value
     XorI(RtReg, u32),
@@ -205,6 +209,8 @@ pub enum Uop {
     XorR8(RtReg8, RtReg8),
     /// Xor Register Values (16-bit)
     XorR16(RtReg, RtReg),
+    /// Xor Register Value and Memory Value (Read-Modify-Write)
+    XorRMW(RtReg, RtReg),
 
     /// Test Register and Immediate Value
     TestI(RtReg, u32),

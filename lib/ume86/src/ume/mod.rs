@@ -1,4 +1,4 @@
-//! User Mode Emulation
+//! User Mode Emulator
 
 #[allow(unused_imports)]
 use alloc::format;
@@ -16,7 +16,7 @@ use crate::ume::uop::{AddrIndex, Uop, UopMinor};
 pub mod tracer;
 pub mod uop;
 
-/// User Mode Emulation
+/// User Mode Emulator
 ///
 /// ## Limitation
 /// * The code segment and data segment must not overlap.
@@ -653,6 +653,13 @@ impl UME {
                     let result = self.alu().and32(dst, src);
                     self.state.reg(rd).e().write(result);
                 }
+                Uop::AndRMW(rd, rs) => {
+                    let addr = self.state.reg(rd).e().read();
+                    let dst = self.read_memory32(addr)?;
+                    let src = self.state.reg(rs).e().read();
+                    let result = self.alu().and32(dst, src);
+                    self.write_memory32(addr, result)?;
+                }
 
                 Uop::OrI8(rd, ib) => {
                     let dst = self.state.reg8(rd).read();
@@ -687,6 +694,13 @@ impl UME {
                     let result = self.alu().or32(dst, src);
                     self.state.reg(rd).e().write(result);
                 }
+                Uop::OrRMW(rd, rs) => {
+                    let addr = self.state.reg(rd).e().read();
+                    let dst = self.read_memory32(addr)?;
+                    let src = self.state.reg(rs).e().read();
+                    let result = self.alu().or32(dst, src);
+                    self.write_memory32(addr, result)?;
+                }
 
                 Uop::XorI8(rd, ib) => {
                     let dst = self.state.reg8(rd).read();
@@ -720,6 +734,13 @@ impl UME {
                     let src = self.state.reg(rs).e().read();
                     let result = self.alu().xor32(dst, src);
                     self.state.reg(rd).e().write(result);
+                }
+                Uop::XorRMW(rd, rs) => {
+                    let addr = self.state.reg(rd).e().read();
+                    let dst = self.read_memory32(addr)?;
+                    let src = self.state.reg(rs).e().read();
+                    let result = self.alu().xor32(dst, src);
+                    self.write_memory32(addr, result)?;
                 }
 
                 Uop::TestI8(rd, ib) => {
@@ -843,6 +864,7 @@ impl UME {
                     let result = self.alu().sar32(dst, cl);
                     self.state.reg(rd).e().write(result);
                 }
+
                 Uop::ShlI8(rd, ib) => {
                     let dst = self.state.reg8(rd).read();
                     let result = self.alu().shl8(dst, ib);
@@ -876,6 +898,7 @@ impl UME {
                     let result = self.alu().shl32(dst, cl);
                     self.state.reg(rd).e().write(result);
                 }
+
                 Uop::ShrI8(rd, ib) => {
                     let dst = self.state.reg8(rd).read();
                     let result = self.alu().shr8(dst, ib);
