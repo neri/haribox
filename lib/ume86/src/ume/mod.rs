@@ -182,7 +182,7 @@ impl UME {
     #[inline]
     pub fn adjust_after_exception(&mut self) {
         self.reflect_eip();
-        self.state.compute_flags();
+        self.state.resolve_flags();
     }
 
     /// Resumes execution after a pause (e.g., after a syscall)
@@ -298,7 +298,7 @@ impl UME {
                 }
                 Uop::JumpR(rs) => {
                     let target = self.state.reg(rs).e().read();
-                    self.tracer.set_eip(Offset32(target));
+                    self.tracer.set_eip(Offset32(target))?;
                     continue;
                 }
                 Uop::Call(func_index, return_addr) => {
@@ -309,13 +309,13 @@ impl UME {
                 Uop::CallR(rd, return_addr) => {
                     let target = self.state.reg(rd).e().read();
                     self.push(return_addr.0).ok_or(Exception::StackFault)?;
-                    self.tracer.set_eip(Offset32(target));
+                    self.tracer.set_eip(Offset32(target))?;
                     continue;
                 }
                 Uop::Ret(iw) => {
                     let return_addr = self.pop().ok_or(Exception::StackFault)?;
                     self.state().esp().modify(|v| v.wrapping_add(iw as u32));
-                    self.tracer.set_eip(Offset32(return_addr));
+                    self.tracer.set_eip(Offset32(return_addr))?;
                     continue;
                 }
                 Uop::JccU(cc, target) => {
@@ -439,6 +439,25 @@ impl UME {
                     let value = u32::from_le_bytes(value.try_into().unwrap());
                     self.state.reg(rd).e().write(value);
                 }
+                Uop::LoadR16CS(rd, rb) => {
+                    let base = self.state.reg(rb).e().read();
+                    let addr = base as usize;
+                    let value = self
+                        .code()
+                        .get(addr..addr + 2)
+                        .ok_or(Exception::SegmentationViolation(Offset32(addr as u32)))?;
+                    let value = u16::from_le_bytes(value.try_into().unwrap());
+                    self.state.reg(rd).w().write(value);
+                }
+                Uop::LoadR8CS(rd, rb) => {
+                    let base = self.state.reg(rb).e().read();
+                    let addr = base as usize;
+                    let value = self
+                        .code()
+                        .get(addr)
+                        .ok_or(Exception::SegmentationViolation(Offset32(addr as u32)))?;
+                    self.state.reg8(rd).write(*value);
+                }
 
                 Uop::StoreR8(rd, rb) => {
                     let base = self.state.reg(rb).e().read();
@@ -535,6 +554,13 @@ impl UME {
                     let result = self.alu().add32(dst, src);
                     self.write_memory32(addr, result)?;
                 }
+                Uop::AddRMW8(rd, rs) => {
+                    let addr = self.state.reg(rd).e().read();
+                    let dst = self.read_memory8(addr)?;
+                    let src = self.state.reg8(rs).read();
+                    let result = self.alu().add8(dst, src);
+                    self.write_memory8(addr, result)?;
+                }
                 Uop::IncR(rd) => {
                     let dst = self.state.reg(rd).e().read();
                     let result = self.alu().inc32(dst);
@@ -580,6 +606,13 @@ impl UME {
                     let src = self.state.reg(rs).e().read();
                     let result = self.alu().sub32(dst, src);
                     self.write_memory32(addr, result)?;
+                }
+                Uop::SubRMW8(rd, rs) => {
+                    let addr = self.state.reg(rd).e().read();
+                    let dst = self.read_memory8(addr)?;
+                    let src = self.state.reg8(rs).read();
+                    let result = self.alu().sub8(dst, src);
+                    self.write_memory8(addr, result)?;
                 }
                 Uop::DecR(rd) => {
                     let dst = self.state.reg(rd).e().read();

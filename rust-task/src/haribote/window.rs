@@ -71,6 +71,7 @@ pub struct WindowId(pub u32);
 pub struct HariWindow {
     window_id: WindowId,
     size: Size,
+    col_inv: usize,
     buffer_ptr: u32,
     buffer_len: usize,
     rgba_buffer: UnsafeCell<Box<[u8]>>,
@@ -85,7 +86,13 @@ impl HariWindow {
     /// Creates a new window with the specified `title` and `size`.
     ///
     /// NOTE: The window buffer of Haribote OS includes the window frame and title bar, so it is necessary to adjust the window size considering the height of the host OS's title bar.
-    pub fn new(context: &App, title: &JisString, size: Size, buffer_ptr: u32) -> Self {
+    pub fn new(
+        context: &App,
+        buffer_ptr: u32,
+        size: Size,
+        col_inv: u32,
+        title: &JisString,
+    ) -> Self {
         let title = title.to_str().unwrap_or("Untitled");
         let width = size.width - (Self::WINDOW_ADJUST_X * 2) as u32;
         let height = size.height - (Self::WINDOW_ADJUST_TOP + Self::WINDOW_ADJUST_BOTTOM) as u32
@@ -102,6 +109,7 @@ impl HariWindow {
         let window = Self {
             window_id,
             size,
+            col_inv: col_inv as usize,
             buffer_ptr,
             buffer_len: (size.width * size.height) as usize,
             rgba_buffer: UnsafeCell::new(rgba_buffer.into_boxed_slice()),
@@ -219,7 +227,12 @@ impl HariWindow {
                     let draw_base = y * width;
                     let slice = &src_buffer[base..base + width];
                     for (x, &c) in slice.iter().enumerate() {
-                        rgba_buffer[draw_base + x] = PALETTE[c as usize];
+                        let color = if c as usize == self.col_inv {
+                            0
+                        } else {
+                            PALETTE[c as usize]
+                        };
+                        rgba_buffer[draw_base + x] = color;
                     }
                     base += stride;
                 }

@@ -35,5 +35,5 @@ test:
 	cargo test --manifest-path $(RUST_DIR)/Cargo.toml
 
 update:
-	pnpm update
 	cargo update --manifest-path $(RUST_DIR)/Cargo.toml
+	pnpm update

@@ -330,8 +330,9 @@ impl ProcessorState {
         &mut self.flags
     }
 
+    /// Resolves the flags based on the current lazy operation and updates the flags register.
     #[inline]
-    pub fn compute_flags(&mut self) -> Flags {
+    pub fn resolve_flags(&mut self) -> Flags {
         self.flags.resolve(&self.lazy_op)
     }
 

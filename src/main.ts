@@ -1833,14 +1833,6 @@ const handleWorkerCommand = (command: WorkerCommand, worker?: Worker): void => {
           height: canvasHeight,
           pixels: new ArrayBuffer(canvasWidth * canvasHeight * 4),
         };
-        // Fill with default background color (#f2f8f7)
-        const bytes = new Uint8Array(fullBuffer.pixels);
-        for (let i = 0; i < bytes.length; i += 4) {
-          bytes[i] = 0xF2;
-          bytes[i + 1] = 0xF8;
-          bytes[i + 2] = 0xF7;
-          bytes[i + 3] = 0xFF;
-        }
       }
 
       // Update buffer with partial image data

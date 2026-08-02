@@ -2,6 +2,7 @@
 
 use crate::_prelude_::*;
 use crate::state::{RtReg, RtReg8};
+use crate::ume::Exception;
 use crate::ume::uop::{AddrIndex, FuncIndex, Uop, UopMinor};
 
 /// Trace based micro IR decoder
@@ -93,7 +94,7 @@ impl TraceDecoder {
 
     /// Returns the current instruction pointer.
     #[inline]
-    pub const fn current_upc(&self) -> AddrIndex {
+    pub fn current_upc(&self) -> AddrIndex {
         self.current_upc
     }
 
@@ -150,18 +151,12 @@ impl TraceDecoder {
 
     /// Sets the instruction pointer to the specified EIP and updates the current UPC accordingly.
     #[inline]
-    pub fn set_eip(&mut self, eip: Offset32) {
+    pub fn set_eip(&mut self, eip: Offset32) -> Result<(), Exception> {
         self.eip_to_fetch = eip;
-        self.current_upc = match self.resolve_target(eip) {
-            Some(v) => v,
-            None => {
-                // TODO: Handle the case where the EIP is not found in the address map after fetching and decoding.
-                todo!(
-                    "Failed to fetch and decode instruction at EIP={:#010x}",
-                    eip.0
-                );
-            }
-        };
+        self.current_upc = self
+            .resolve_target(eip)
+            .ok_or(Exception::SegmentationViolation(eip))?;
+        Ok(())
     }
 
     /// Replaces the current instruction with a new Uop in the cache.
@@ -193,7 +188,7 @@ impl TraceDecoder {
             self.current_upc = target;
         } else {
             // Function is not yet resolved, and we don't have a target address in the address map
-            self.set_eip(function.0);
+            self.set_eip(function.0).unwrap();
             if let Some(&target) = self.address_map.get(&function.0) {
                 self.functions[func_index.0 as usize].1 = target;
                 // self.current_upc = target;
@@ -204,17 +199,18 @@ impl TraceDecoder {
     }
 
     /// Generates a best effort LEA sequence for the given memory operand and destination register.
-    pub fn generate_lea(rd: RtReg, memopr: MemOpr32) -> Uop {
-        match memopr.base_index {
-            BaseIndex32::DispOnly => Uop::LoadConst(rd, memopr.disp.0),
+    #[inline]
+    pub fn generate_lea(rd: RtReg, ma: MemOpr32) -> Uop {
+        match ma.base_index {
+            BaseIndex32::DispOnly => Uop::LoadConst(rd, ma.disp.0),
             BaseIndex32::Base(base) => {
-                if memopr.disp.0 == 0 {
+                if ma.disp.0 == 0 {
                     Uop::Move(rd, base.into())
                 } else {
-                    Uop::LeaBD(rd, base.into(), memopr.disp)
+                    Uop::LeaBD(rd, base.into(), ma.disp)
                 }
             }
-            BaseIndex32::Sib(sib) => Uop::LeaSIB(rd, sib, memopr.disp),
+            BaseIndex32::Sib(sib) => Uop::LeaSIB(rd, sib, ma.disp),
         }
     }
 
@@ -241,44 +237,98 @@ impl TraceDecoder {
     }
 
     /// Emits a best effort load sequence for the given memory operand and destination register.
-    pub fn emit_load32(uop_cache: &mut Vec<Uop>, rd: RtReg, memopr: MemOpr32) {
-        match memopr.segment {
+    pub fn emit_load32(uop_cache: &mut Vec<Uop>, rd: RtReg, ma: MemOpr32) {
+        match ma.segment {
             SrIndex::CS => {
-                let mem_addr = Self::emit_lea_opt(uop_cache, memopr);
+                let mem_addr = Self::emit_lea_opt(uop_cache, ma);
                 uop_cache.push(Uop::LoadR32CS(rd, mem_addr));
             }
-            _ => match memopr.base_index {
-                BaseIndex32::DispOnly => {
-                    uop_cache.push(Uop::LoadBD32(rd, RtReg::Zero, memopr.disp))
-                }
+            _ => match ma.base_index {
+                BaseIndex32::DispOnly => uop_cache.push(Uop::LoadBD32(rd, RtReg::Zero, ma.disp)),
                 BaseIndex32::Base(base) => {
-                    if memopr.disp.0 == 0 {
+                    if ma.disp.0 == 0 {
                         uop_cache.push(Uop::LoadR32(rd, base.into()));
                     } else {
-                        uop_cache.push(Uop::LoadBD32(rd, base.into(), memopr.disp));
+                        uop_cache.push(Uop::LoadBD32(rd, base.into(), ma.disp));
                     }
                 }
-                BaseIndex32::Sib(sib) => uop_cache.push(Uop::LoadSIB32(rd, sib, memopr.disp)),
+                BaseIndex32::Sib(sib) => uop_cache.push(Uop::LoadSIB32(rd, sib, ma.disp)),
+            },
+        }
+    }
+
+    /// Emits a best effort load sequence for the given memory operand and destination register (8-bit).
+    pub fn emit_load8(uop_cache: &mut Vec<Uop>, rd: RtReg8, ma: MemOpr32) {
+        match ma.segment {
+            SrIndex::CS => {
+                let mem_addr = Self::emit_lea_opt(uop_cache, ma);
+                uop_cache.push(Uop::LoadR8CS(rd, mem_addr));
+            }
+            _ => match ma.base_index {
+                BaseIndex32::DispOnly => {
+                    uop_cache.push(Uop::LoadConst(RtReg::MemAddr, ma.disp.0));
+                    uop_cache.push(Uop::LoadR8(rd, RtReg::MemAddr));
+                }
+                BaseIndex32::Base(base) => {
+                    if ma.disp.0 == 0 {
+                        uop_cache.push(Uop::LoadR8(rd, base.into()));
+                    } else {
+                        let addr = Self::emit_lea_opt(uop_cache, ma);
+                        uop_cache.push(Uop::LoadR8(rd, addr));
+                    }
+                }
+                BaseIndex32::Sib(_sib) => {
+                    let addr = Self::emit_lea_opt(uop_cache, ma);
+                    uop_cache.push(Uop::LoadR8(rd, addr));
+                }
+            },
+        }
+    }
+
+    /// Emits a best effort load sequence for the given memory operand and destination register (16-bit).
+    pub fn emit_load16(uop_cache: &mut Vec<Uop>, rd: RtReg, ma: MemOpr32) {
+        match ma.segment {
+            SrIndex::CS => {
+                let mem_addr = Self::emit_lea_opt(uop_cache, ma);
+                uop_cache.push(Uop::LoadR16CS(rd, mem_addr));
+            }
+            _ => match ma.base_index {
+                BaseIndex32::DispOnly => {
+                    uop_cache.push(Uop::LoadConst(RtReg::MemAddr, ma.disp.0));
+                    uop_cache.push(Uop::LoadR16(rd, RtReg::MemAddr));
+                }
+                BaseIndex32::Base(base) => {
+                    if ma.disp.0 == 0 {
+                        uop_cache.push(Uop::LoadR16(rd, base.into()));
+                    } else {
+                        let addr = Self::emit_lea_opt(uop_cache, ma);
+                        uop_cache.push(Uop::LoadR16(rd, addr));
+                    }
+                }
+                BaseIndex32::Sib(_sib) => {
+                    let addr = Self::emit_lea_opt(uop_cache, ma);
+                    uop_cache.push(Uop::LoadR16(rd, addr));
+                }
             },
         }
     }
 
     /// Generates a best effort store sequence for the given memory operand and source register.
-    pub fn generate_store32(rd: RtReg, memopr: MemOpr32) -> Uop {
-        match memopr.segment {
+    pub fn generate_store32(rd: RtReg, ma: MemOpr32) -> Uop {
+        match ma.segment {
             SrIndex::CS => {
                 todo!();
             }
-            _ => match memopr.base_index {
-                BaseIndex32::DispOnly => Uop::StoreBD32(rd, RtReg::Zero, memopr.disp),
+            _ => match ma.base_index {
+                BaseIndex32::DispOnly => Uop::StoreBD32(rd, RtReg::Zero, ma.disp),
                 BaseIndex32::Base(base) => {
-                    if memopr.disp.0 == 0 {
+                    if ma.disp.0 == 0 {
                         Uop::StoreR32(rd, base.into())
                     } else {
-                        Uop::StoreBD32(rd, base.into(), memopr.disp)
+                        Uop::StoreBD32(rd, base.into(), ma.disp)
                     }
                 }
-                BaseIndex32::Sib(sib) => Uop::StoreSIB32(rd, sib, memopr.disp),
+                BaseIndex32::Sib(sib) => Uop::StoreSIB32(rd, sib, ma.disp),
             },
         }
     }
@@ -379,8 +429,24 @@ impl TraceDecoder {
                     self.uop_cache.push(Uop::AddR(rd.into(), rs.into()));
                 }
 
+                IrOp::ADD_MbA32_Ib(ma, ib) => {
+                    Self::emit_rmw8(&mut self.uop_cache, ma, |uop_cache| {
+                        uop_cache.push(Uop::AddI8(RtReg8::MemData, ib))
+                    });
+                }
+                IrOp::ADD_MbA32_Rb(ma, rs) => {
+                    let mem_addr = Self::emit_lea_opt(&mut self.uop_cache, ma);
+                    self.uop_cache.push(Uop::AddRMW8(mem_addr, rs.into()));
+                }
+                IrOp::ADD_Rb_Ib(rd, ib) => {
+                    self.uop_cache.push(Uop::AddI8(rd.into(), ib));
+                }
                 IrOp::ADD_Rb_Rb(rd, rs) => {
                     self.uop_cache.push(Uop::AddR8(rd.into(), rs.into()));
+                }
+                IrOp::ADD_Rb_MbA32(rd, ma) => {
+                    Self::emit_load8(&mut self.uop_cache, RtReg8::MemData, ma);
+                    self.uop_cache.push(Uop::AddR8(rd.into(), RtReg8::MemData));
                 }
 
                 IrOp::AND_MdA32_Id(ma, id) => {
@@ -442,8 +508,7 @@ impl TraceDecoder {
                 }
 
                 IrOp::CMP_MbA32_Ib(ma, ib) => {
-                    let mem_addr = Self::emit_lea_opt(&mut self.uop_cache, ma);
-                    self.uop_cache.push(Uop::LoadR8(RtReg8::MemData, mem_addr));
+                    Self::emit_load8(&mut self.uop_cache, RtReg8::MemData, ma);
                     self.uop_cache.push(Uop::CmpI8(RtReg8::MemData, ib));
                 }
                 IrOp::CMP_MdA32_Id(ma, id) => {
@@ -471,8 +536,7 @@ impl TraceDecoder {
                     self.uop_cache.push(Uop::CmpR(rd.into(), rs.into()));
                 }
                 IrOp::CMP_MwA32_Iw(ma, iw) => {
-                    let mem_addr = Self::emit_lea_opt(&mut self.uop_cache, ma);
-                    self.uop_cache.push(Uop::LoadR16(RtReg::MemData, mem_addr));
+                    Self::emit_load16(&mut self.uop_cache, RtReg::MemData, ma);
                     self.uop_cache.push(Uop::CmpI16(RtReg::MemData, iw));
                 }
 
@@ -567,6 +631,15 @@ impl TraceDecoder {
                     let mem_addr = Self::emit_lea_opt(&mut self.uop_cache, ma);
                     self.uop_cache.push(Uop::StoreR8(rb.into(), mem_addr));
                 }
+                IrOp::MOV_Rb_Ib(rd, ib) => {
+                    self.uop_cache.push(Uop::LoadConst8(rd.into(), ib));
+                }
+                IrOp::MOV_Rb_Rb(rd, rs) => {
+                    self.uop_cache.push(Uop::Move8(rd.into(), rs.into()));
+                }
+                IrOp::MOV_Rb_MbA32(rd, ma) => {
+                    Self::emit_load8(&mut self.uop_cache, rd.into(), ma);
+                }
 
                 IrOp::MOV_MdA32_Id(ma, id) => {
                     self.uop_cache.push(Uop::LoadConst(RtReg::MemData, id));
@@ -576,34 +649,6 @@ impl TraceDecoder {
                 IrOp::MOV_MdA32_Rd(ma, rd) => {
                     self.uop_cache.push(Self::generate_store32(rd.into(), ma));
                 }
-                IrOp::MOV_MwA32_Iw(ma, iw) => {
-                    self.uop_cache.push(Uop::LoadConst16(RtReg::MemData, iw));
-                    let mem_addr = Self::emit_lea_opt(&mut self.uop_cache, ma);
-                    self.uop_cache.push(Uop::StoreR16(RtReg::MemData, mem_addr));
-                }
-                IrOp::MOV_MwA32_Rw(ma, rw) => {
-                    let mem_addr = Self::emit_lea_opt(&mut self.uop_cache, ma);
-                    self.uop_cache
-                        .push(Uop::StoreR16(rw.upgrade().into(), mem_addr));
-                }
-
-                IrOp::MOV_Rb_Ib(rd, ib) => {
-                    self.uop_cache.push(Uop::LoadConst8(rd.into(), ib));
-                }
-                IrOp::MOV_Rb_Rb(rd, rs) => {
-                    self.uop_cache.push(Uop::Move8(rd.into(), rs.into()));
-                }
-                IrOp::MOV_Rb_MbA32(rd, ma) => {
-                    let mem_addr = Self::emit_lea_opt(&mut self.uop_cache, ma);
-                    self.uop_cache.push(Uop::LoadR8(rd.into(), mem_addr));
-                }
-
-                IrOp::MOV_Rw_MwA32(rd, ma) => {
-                    let mem_addr = Self::emit_lea_opt(&mut self.uop_cache, ma);
-                    self.uop_cache
-                        .push(Uop::LoadR16(rd.upgrade().into(), mem_addr));
-                }
-
                 IrOp::MOV_Rd_Id(rd, id) => {
                     self.uop_cache.push(Uop::LoadConst(rd.into(), id));
                 }
@@ -616,25 +661,45 @@ impl TraceDecoder {
                     }
                 }
 
-                IrOp::MOVSX_Rd_MbA32(rd, ma) => {
+                IrOp::MOV_MwA32_Iw(ma, iw) => {
+                    self.uop_cache.push(Uop::LoadConst16(RtReg::MemData, iw));
                     let mem_addr = Self::emit_lea_opt(&mut self.uop_cache, ma);
-                    self.uop_cache.push(Uop::LoadR8(RtReg8::MemData, mem_addr));
+                    self.uop_cache.push(Uop::StoreR16(RtReg::MemData, mem_addr));
+                }
+                IrOp::MOV_MwA32_Rw(ma, rw) => {
+                    let mem_addr = Self::emit_lea_opt(&mut self.uop_cache, ma);
+                    self.uop_cache
+                        .push(Uop::StoreR16(rw.upgrade().into(), mem_addr));
+                }
+                IrOp::MOV_Rw_MwA32(rd, ma) => {
+                    Self::emit_load16(&mut self.uop_cache, rd.upgrade().into(), ma);
+                }
+
+                IrOp::MOVSX_Rd_MbA32(rd, ma) => {
+                    Self::emit_load8(&mut self.uop_cache, RtReg8::MemData, ma);
                     self.uop_cache.push(Uop::MovSx8(rd.into(), RtReg8::MemData));
                 }
                 IrOp::MOVSX_Rd_Rb(rd, rs) => {
                     self.uop_cache.push(Uop::MovSx8(rd.into(), rs.into()));
                 }
+                IrOp::MOVSX_Rd_MwA32(rd, ma) => {
+                    Self::emit_load16(&mut self.uop_cache, RtReg::MemData, ma);
+                    self.uop_cache.push(Uop::MovSx16(rd.into(), RtReg::MemData));
+                }
+                IrOp::MOVSX_Rd_Rw(rd, rs) => {
+                    self.uop_cache
+                        .push(Uop::MovSx16(rd.into(), rs.upgrade().into()));
+                }
+
+                IrOp::MOVZX_Rd_MbA32(rd, ma) => {
+                    Self::emit_load8(&mut self.uop_cache, RtReg8::MemData, ma);
+                    self.uop_cache.push(Uop::MovZx8(rd.into(), RtReg8::MemData));
+                }
                 IrOp::MOVZX_Rd_Rb(rd, rs) => {
                     self.uop_cache.push(Uop::MovZx8(rd.into(), rs.into()));
                 }
-                IrOp::MOVZX_Rd_MbA32(rd, rs) => {
-                    let mem_addr = Self::emit_lea_opt(&mut self.uop_cache, rs);
-                    self.uop_cache.push(Uop::LoadR8(RtReg8::MemData, mem_addr));
-                    self.uop_cache.push(Uop::MovZx8(rd.into(), RtReg8::MemData));
-                }
                 IrOp::MOVZX_Rd_MwA32(rd, ma) => {
-                    let mem_addr = Self::emit_lea_opt(&mut self.uop_cache, ma);
-                    self.uop_cache.push(Uop::LoadR16(RtReg::MemData, mem_addr));
+                    Self::emit_load16(&mut self.uop_cache, RtReg::MemData, ma);
                     self.uop_cache.push(Uop::MovZx16(rd.into(), RtReg::MemData));
                 }
                 IrOp::MOVZX_Rd_Rw(rd, rs) => {
@@ -653,6 +718,11 @@ impl TraceDecoder {
                 }
                 IrOp::NEG_Rd(rd) => self.uop_cache.push(Uop::NegR(rd.into())),
 
+                IrOp::NOT_MdA32(ma) => {
+                    Self::emit_rmw32(&mut self.uop_cache, ma, |uop_cache| {
+                        uop_cache.push(Uop::NotR(RtReg::MemData))
+                    });
+                }
                 IrOp::NOT_Rd(rd) => {
                     self.uop_cache.push(Uop::NotR(rd.into()));
                 }
@@ -704,11 +774,11 @@ impl TraceDecoder {
                 IrOp::REP_MOVSD(_sr, _a32) => {
                     self.uop_cache.push(Uop::Minor(UopMinor::RepMovsd));
                 }
-                IrOp::REP_STOSD(_sr, _a32) => {
-                    self.uop_cache.push(Uop::Minor(UopMinor::RepStosd));
-                }
                 IrOp::REP_STOSB(_sr, _a32) => {
                     self.uop_cache.push(Uop::Minor(UopMinor::RepStosb));
+                }
+                IrOp::REP_STOSD(_sr, _a32) => {
+                    self.uop_cache.push(Uop::Minor(UopMinor::RepStosd));
                 }
                 IrOp::REPNZ_SCASB(_sr, _a32) => {
                     self.uop_cache.push(Uop::Minor(UopMinor::RepNzScasb));
@@ -804,8 +874,7 @@ impl TraceDecoder {
                 }
 
                 IrOp::TEST_MbA32_Ib(ma, ib) => {
-                    let mem_addr = Self::emit_lea_opt(&mut self.uop_cache, ma);
-                    self.uop_cache.push(Uop::LoadR8(RtReg8::MemData, mem_addr));
+                    Self::emit_load8(&mut self.uop_cache, RtReg8::MemData, ma);
                     self.uop_cache.push(Uop::TestI8(RtReg8::MemData, ib));
                 }
                 IrOp::TEST_MdA32_Id(ma, id) => {

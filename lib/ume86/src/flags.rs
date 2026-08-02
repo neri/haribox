@@ -261,6 +261,14 @@ impl FlagsRegister {
         self.valid_mask = Flags::ZF;
     }
 
+    /// Adjusts the flags after a multiplication operation
+    #[inline]
+    pub fn adjust_after_mul(&mut self) {
+        // the CF and OF flags are set depending on the result of the multiplication, other dynamic flags are undefined, so we clear them
+        self.dynamic_value = Flags::ZERO;
+        self.valid_mask = Flags::ZERO;
+    }
+
     #[inline]
     pub fn set_bits(&mut self, bits: Flags) {
         self.dynamic_value = bits & Self::DYNAMIC_VALUE_MASK;
@@ -275,13 +283,6 @@ impl FlagsRegister {
         self.dynamic_value = self.dynamic_value & Self::DYNAMIC_VALUE_MASK;
         self.static_value = self.static_value & !Self::DYNAMIC_VALUE_MASK;
         (self.dynamic_value | self.static_value) & self.always_0_mask | self.always_1_mask
-    }
-
-    /// Discards the specified flags from the dynamic value
-    #[inline]
-    pub fn discard(&mut self, mask: Flags) {
-        self.dynamic_value &= !mask;
-        self.valid_mask |= mask;
     }
 
     #[inline]

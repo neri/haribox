@@ -7,7 +7,6 @@
   --button-hover: #ece9df;
   --titlebar-bg: #e8e8e8;
   --titlebar-text: #111;
-  --canvas-bg: #f2f8f7;
   --primary-color: #0b5ed7;
   --primary-text-color: #fff;
   --primary-inactive-text-color: #808080;
@@ -192,7 +191,6 @@ body,
 .window-frame {
   position: absolute;
   border: 1px solid #000;
-  background: #fff;
   color: #707070;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.15);
   touch-action: none;
@@ -277,7 +275,6 @@ body,
 
 .window-canvas {
   display: block;
-  background: var(--canvas-bg);
 }
 
 .terminal-panel {

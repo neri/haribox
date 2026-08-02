@@ -82,6 +82,10 @@ pub enum Uop {
 
     /// Load from Memory with Base Register and Code Segment
     LoadR32CS(RtReg, RtReg),
+    /// Load from Memory with Base Register and Code Segment (8-bit)
+    LoadR8CS(RtReg8, RtReg),
+    /// Load from Memory with Base Register and Code Segment (16-bit)
+    LoadR16CS(RtReg, RtReg),
 
     /// Store to Memory with Base Register
     StoreR32(RtReg, RtReg),
@@ -130,6 +134,8 @@ pub enum Uop {
     AddR16(RtReg, RtReg),
     /// Add Register Value and Memory Value (Read-Modify-Write)
     AddRMW(RtReg, RtReg),
+    /// Add Register Value and Memory Value (Read-Modify-Write) (8-bit)
+    AddRMW8(RtReg, RtReg8),
 
     /// Subtract Register and Immediate Value
     SubI(RtReg, u32),
@@ -145,6 +151,8 @@ pub enum Uop {
     SubR16(RtReg, RtReg),
     /// Subtract Register Value and Memory Value (Read-Modify-Write)
     SubRMW(RtReg, RtReg),
+    /// Subtract Register Value and Memory Value (Read-Modify-Write) (8-bit)
+    SubRMW8(RtReg, RtReg8),
 
     /// Negate Register Value
     NegR(RtReg),

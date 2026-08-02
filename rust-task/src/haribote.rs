@@ -174,7 +174,7 @@ impl App {
         let status = loop {
             match self.emulator.execute() {
                 Ok(()) => break Ok(ExitStatus::Continue),
-                Err(Exception::Swi(64)) => match self.syscall() {
+                Err(Exception::Swi(64)) => match self.handle_syscall() {
                     Ok(ExitStatus::Continue) => {
                         self.emulator.resume_next();
                         continue;
@@ -209,17 +209,17 @@ impl App {
                 let mut buf = Vec::new();
 
                 let tracer = self.emulator.tracer();
-                let map = tracer.address_map();
-                for (addr, upc) in map.iter() {
-                    buf.push(format!("[rust] address_map: {:?} => upc={:?}", *addr, upc));
-                }
-                for (i, uop) in tracer.uop_cache().iter().enumerate() {
-                    buf.push(format!("[rust] uop_cache[{}]: {:?}", i, uop));
-                }
-                let last_upc = tracer.current_upc();
 
+                // for (addr, upc) in tracer.address_map().iter() {
+                //     buf.push(format!("[rust] address_map: {:?} => upc={:?}", *addr, upc));
+                // }
+                // for (i, uop) in tracer.uop_cache().iter().enumerate() {
+                //     buf.push(format!("[rust] uop_cache[{}]: {:?}", i, uop));
+                // }
+
+                let last_upc = tracer.current_upc();
                 let state = self.emulator.state_mut();
-                let flags = state.compute_flags();
+                let flags = state.resolve_flags();
                 buf.push(format!(
                     "[rust] {:?}, EIP={:#010x}, UPC={} Flags={:#010x}",
                     err,
@@ -286,42 +286,50 @@ impl App {
     }
 
     /// Haribote OS syscall handler
-    pub fn syscall(&mut self) -> Result<ExitStatus, Exception> {
+    pub fn handle_syscall(&mut self) -> Result<ExitStatus, Exception> {
         match self.emulator.state().edx().read() {
             1 => {
-                // putchar
+                // void api_putchar(int c);
                 crate::print!("{}", self.emulator.state().al().read() as char);
             }
             2 => {
-                // putstring (cstr)
+                // void api_putstr0(char *s);
                 let s = self.get_cstr(self.emulator.state().ebx().read())?;
                 crate::print!("{}", s);
             }
-            // 3 putstring (length:ecx, string:ebx)
+            // 3 => {
+            //     // void api_putstr1(char *s, int l);
+            //     // s: ebx, l: ecx
+            //     // This API is not implemented.
+            // }
             4 => {
-                // exit
+                // void api_end(void);
                 return Ok(ExitStatus::Exit);
             }
             5 => {
-                // open_win(title:ecx, width:esi, height:edi, buffer:ebx)
-                let title = self.get_cstr(self.emulator.state().ecx().read())?;
+                // int api_openwin(char *buf, int xsiz, int ysiz, int col_inv, char *title);
+                // buf: ebx, xsiz: esi, ysiz: edi, col_inv: eax, title: ecx
+                let buffer = self.emulator.state().ebx().read();
                 let width = self.emulator.state().esi().read();
                 let height = self.emulator.state().edi().read();
-                let buffer = self.emulator.state().ebx().read();
+                let col_inv = self.emulator.state().eax().read();
+                let title = self.get_cstr(self.emulator.state().ecx().read())?;
                 crate::println!(
-                    "[rust] open_win({:?}, {}, {}, {:08x})",
-                    title.to_str().unwrap_or(""),
+                    "[rust] openwin({:#x}, {}, {}, {}, {:?},)",
+                    buffer,
                     width,
                     height,
-                    buffer,
+                    col_inv as i32,
+                    title.to_str().unwrap_or(""),
                 );
-                let window = HariWindow::new(self, &title, Size { width, height }, buffer);
+                let window = HariWindow::new(self, buffer, Size { width, height }, col_inv, &title);
                 self.windows.push(window);
                 let window_id = (self.windows.len() as u32) << 1;
                 self.emulator.state().eax().write(window_id);
             }
             6 => {
-                // draw_text(window:ebx, x: esi, y:edi, color: eax, text:ebp, ecx: length)
+                // void api_putstrwin(int win, int x, int y, int col, int len, char *str);
+                // win: ebx, x: esi, y: edi, col: eax, len: ecx, str: ebp
                 match self.window_handle(self.emulator.state().ebx().read()) {
                     Some((window, redraw)) => {
                         let x = self.emulator.state().esi().read() as i32;
@@ -335,7 +343,8 @@ impl App {
                 }
             }
             7 => {
-                // fill_rect(window:ebx, x0:eax, y0:ecx, x1:esi, y1:edi, color:ebp)
+                // void api_boxfilwin(int win, int x0, int y0, int x1, int y1, int col);
+                // win: ebx, x0: eax, y0: ecx, x1: esi, y1: edi, col: ebp
                 self.window_handle(self.emulator.state().ebx().read())
                     .map(|(window, redraw)| {
                         let x0 = self.emulator.state().eax().read() as i32;
@@ -353,25 +362,29 @@ impl App {
                     });
             }
             8 => {
-                // init malloc (start:eax, size:ecx)
+                // void api_initmalloc(void);
+                // start: eax, size: ecx
                 let start = self.emulator.state().eax().read() as usize;
                 let size = self.emulator.state().ecx().read() as usize;
                 self.allocator.init(start, size);
             }
             9 => {
-                // malloc (size:ecx)
+                // char *api_malloc(int size);
+                // size: ecx
                 let size = self.emulator.state().ecx().read() as usize;
                 let addr = self.allocator.alloc(size);
                 self.emulator.state().eax().write(addr.unwrap_or(0) as u32);
             }
             10 => {
-                // free (ptr:eax, size:ecx)
+                // void api_free(char *addr, int size);
+                // addr: eax, size: ecx
                 let addr = self.emulator.state().eax().read() as usize;
                 let size = self.emulator.state().ecx().read() as usize;
                 self.allocator.free(addr, size);
             }
             11 => {
-                // set pixel (window:ebx, x:esi, y:edi, color:al)
+                // void api_point(int win, int x, int y, int col);
+                // win: ebx, x: esi, y: edi, col: al
                 self.window_handle(self.emulator.state().ebx().read())
                     .map(|(window, redraw)| {
                         let x = self.emulator.state().esi().read() as i32;
@@ -381,7 +394,8 @@ impl App {
                     });
             }
             12 => {
-                // refresh window (window:ebx, x0:eax, y0:ecx, x1:esi, y1:edi)
+                // void api_refreshwin(int win, int x0, int y0, int x1, int y1);
+                // win: ebx, x0: eax, y0: ecx, x1: esi, y1: edi
                 self.window_handle(self.emulator.state().ebx().read())
                     .map(|(window, _redraw)| {
                         let x0 = self.emulator.state().eax().read() as i32;
@@ -392,7 +406,8 @@ impl App {
                     });
             }
             13 => {
-                // draw_line(window:ebx, x0:eax, y0:ecx, x1:esi, y1:edi, color:ebp)
+                // void api_linewin(int win, int x0, int y0, int x1, int y1, int col);
+                // win: ebx, x0: eax, y0: ecx, x1: esi, y1: edi, col: ebp
                 self.window_handle(self.emulator.state().ebx().read())
                     .map(|(window, redraw)| {
                         let x0 = self.emulator.state().eax().read() as i32;
@@ -410,10 +425,14 @@ impl App {
                     });
             }
             14 => {
-                // TODO: close window
+                // void api_closewin(int win);
+                // win: ebx
+
+                // This API is nothing to do for now.
             }
             15 => {
-                // get key
+                // int api_getkey(int mode);
+                // mode: eax
                 let sleep = self.emulator.state().eax().read() != 0;
                 if sleep {
                     self.state = AppState::WaitKey(false);
@@ -424,33 +443,38 @@ impl App {
                 }
             }
             16 => {
-                // alloc timer
+                // int api_alloctimer(void);
                 self.emulator.state().eax().write(self.timers.allocate().0);
             }
             17 => {
-                // init timer (handle:ebx, value:eax)
+                // void api_inittimer(int timer, int data);
+                // timer: ebx, data: eax
                 self.timers.init(
                     Handle(self.emulator.state().ebx().read()),
                     self.emulator.state().eax().read() + Self::TIMER_ID_BIAS,
                 );
             }
             18 => {
-                // set timer (handle:ebx, timeout:eax)
+                // void api_settimer(int timer, int time);
+                // timer: ebx, time: eax
                 self.timers.set(
                     Handle(self.emulator.state().ebx().read()),
                     self.emulator.state().eax().read() * 10, /* 10ms */
                 );
             }
             19 => {
-                // free timer (handle:ebx)
+                // void api_freetimer(int timer);
+                // timer: ebx
                 self.timers.free(Handle(self.emulator.state().ebx().read()));
             }
             20 => {
-                // beep
+                // void api_beep(int tone);
+                // tone: eax
                 js_play_sound(self.emulator.state().eax().read());
             }
             21 => {
-                // open file for read
+                // int api_fopen(char *fname);
+                // fname: ebx
                 let filename = self.get_cstr(self.emulator.state().ebx().read())?;
                 let filename_str = filename.to_str().unwrap_or("").to_owned();
                 self.emulator.state().eax().write(
@@ -461,12 +485,14 @@ impl App {
                 );
             }
             22 => {
-                // close file
+                // void api_fclose(int fhandle);
+                // fhandle: eax
                 let handle = Handle(self.emulator.state().eax().read());
                 self.files.close_file(handle);
             }
             23 => {
-                // seek file
+                // void api_fseek(int fhandle, int offset, int mode);
+                // fhandle: eax, offset: ebx, mode: ecx
                 let handle = Handle(self.emulator.state().eax().read());
                 self.files.get(handle).map(|file| {
                     let offset = self.emulator.state().ebx().read() as isize;
@@ -476,7 +502,8 @@ impl App {
                 });
             }
             24 => {
-                // get file size
+                // int api_fsize(int fhandle, int mode);
+                // fhandle: eax, mode: ecx
                 let handle = Handle(self.emulator.state().eax().read());
                 self.files.get(handle).map(|file| {
                     let whence =
@@ -486,7 +513,8 @@ impl App {
                 });
             }
             25 => {
-                // read file
+                // int api_fread(char *buf, int maxsize, int fhandle);
+                // buf: ebx, maxsize: ecx, fhandle: eax
                 let handle = Handle(self.emulator.state().eax().read());
 
                 let buf_ptr = self.emulator.state().ebx().read() as usize;
@@ -508,7 +536,8 @@ impl App {
                 self.emulator.state().eax().write(read as u32);
             }
             26 => {
-                // get cmdline
+                // int api_cmdline(char *buf, int maxsize);
+                // buf: ebx, maxsize: ecx
                 let cmdline = self.cmdline.as_bytes();
                 let buf_ptr = self.emulator.state().ebx().read() as usize;
                 let buf_len = self.emulator.state().ecx().read() as usize;
@@ -523,7 +552,7 @@ impl App {
                 self.emulator.state().eax().write(copy_len as u32);
             }
             27 => {
-                // get lang mode
+                // int api_getlang(void);
                 self.emulator.state().eax().write(self.lang_mode as u32);
                 self.emulator.state().ecx().write(Self::OS_ID);
                 self.emulator.state().edx().write(Self::OS_VER);
@@ -560,6 +589,7 @@ impl App {
                     }
                     2 => {
                         // int api_getkeyEx(int mode);
+                        // mode: eax
                         let sleep = self.emulator.state().eax().read() != 0;
                         if sleep {
                             self.state = AppState::WaitKey(true);
