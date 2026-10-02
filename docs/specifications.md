@@ -73,7 +73,7 @@
 - `SET <name>` で環境変数の現在値が表示される
 - `DIR` コマンド実行時にファイル一覧が表示される
 - `LS` コマンド実行時にファイル一覧が表示される（`DIR` のエイリアス）
-- `START <filename> [args...]` および `NCST <filename> [args...]` および `OPEN <filename> [args...]` コマンド実行時、ダミーターミナルでタスクが起動される
+- `START <filename> [args...]` および `NCST <filename> [args...]` および `OPEN <filename> [args...]` コマンド実行時、出力先端末なしでタスクが起動される
   - タスク出力がターミナルに表示されない
   - デフォルトターミナルへのフォールバック出力も発生しない
   - 起動エラーは `console.error` にのみ出力される
@@ -219,21 +219,25 @@
 - Rust 側から戻り値の数値ハンドル指定でウィンドウ操作インターフェースを呼べる
 - Rust 側から Canvas imageData 一括描画インターフェースを呼べる
 - Rust タスクウィンドウの内容領域が Canvas である
-- 上記 Worker 起動時に `terminalWindowId`・`fileName`・`commandLine` が引数として渡される
+- 上記 Worker 起動時に `fileName`・`commandLine` が引数として渡される（出力先端末は Main 側がタスクごとに保持する）
 - Worker の起動は `startWithCommand` のみで、起動引数が必須である
-- Worker が `println` / `print` インターフェースで指定端末へデバッグ出力できる
+- Worker が `println` / `print` メッセージでタスクの出力先端末へ出力できる（出力先は Main が決める）
 - Worker 実行中のメッセージ処理が非ブロッキングで実行される
+- タスクの最後の Canvas ウィンドウを閉じると、100 ミリ秒後にタスクが終了する（その間に新しいウィンドウが開かれた場合は継続する）
+- 上記の終了は、タスクが応答しない状態（待ちに入らず計算を続けている）でも行われる
+- 複数の Canvas ウィンドウを持つタスクは、一部を閉じても継続する
+- タスク終了時に、そのタスクが鳴らしていた音が止まる
 
 ### 1.16 複数Worker対応
 
 - Main がファイルシステムを一元管理する
-- 複数 Worker が同時実行時、各 Worker は Main から最新スナップショットを受け取る
-- Worker が `js_write_file` で書き込みを実施すると、Main が全 Worker へ `updateFileSystemSnapshot` メッセージを配信する
-- Worker が スナップショット更新メッセージを受け取ると、内部の fileSystem が最新化される
+- 各 Worker は起動時に Main からスナップショットを受け取る
+- ファイルシステムが変更されると（Worker の `js_write_file`、ターミナルの `COPY` / `DEL` / `REN`、ファイル取り込み）、Main が全 Worker へ変更分を `fileSystemChanged` メッセージで配信する
+- Worker が変更メッセージを受け取ると、内部の fileSystem が最新化される
+- `js_write_file` が成功を返した書き込みは、必ず Main に保存される
 - 複数 Worker 実行時、一方の Worker の書き込み内容が、他方の Worker で読み込める
 - ファイル書き込み後の `persistFileSystem()` は Main でのみ実行される
 - localStorage への永続化は原子的に実行される（二重書き込みなし）
-- 複数 Worker 実行時、ファイルシステム更新メッセージに `isInitialFile` フラグが含まれる
 
 ### 1.17 タスクバーウィンドウ一覧機能
 

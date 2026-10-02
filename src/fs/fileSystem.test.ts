@@ -165,6 +165,25 @@ describe('onFileSystemChanged', () => {
     expect(listener).toHaveBeenCalledTimes(3);
   });
 
+  it('describes the change, with a rename as remove and put', () => {
+    const listener = vi.fn();
+    const unsubscribe = onFileSystemChanged(listener);
+
+    upsertFile('a.txt', bytes('A'));
+    renameFile('a.txt', 'b.txt');
+    removeFile('B.TXT');
+    unsubscribe();
+
+    expect(listener.mock.calls.map(([changes]) => changes)).toEqual([
+      [{ type: 'put', name: 'a.txt', content: bytes('A') }],
+      [
+        { type: 'remove', name: 'a.txt' },
+        { type: 'put', name: 'b.txt', content: bytes('A') },
+      ],
+      [{ type: 'remove', name: 'B.TXT' }],
+    ]);
+  });
+
   it('notifies after the change is visible', () => {
     let seen = false;
     const unsubscribe = onFileSystemChanged(() => {

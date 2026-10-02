@@ -10,8 +10,10 @@ pub struct TimerManager {
 }
 
 pub struct Timer {
-    value: u32,
-    is_active: bool,
+    /// Data delivered to the application when the timer expires
+    data: u32,
+    /// Expiration time in milliseconds of the monotonic timer, `None` if not running
+    deadline: Option<f64>,
 }
 
 impl TimerManager {
@@ -25,8 +27,8 @@ impl TimerManager {
 
     pub fn allocate(&mut self) -> Handle {
         let timer = Timer {
-            value: 0,
-            is_active: false,
+            data: 0,
+            deadline: None,
         };
         let handle = Handle(self.next_handle);
         self.next_handle += 1;
@@ -39,31 +41,52 @@ impl TimerManager {
         js_get_tick()
     }
 
-    pub fn init(&mut self, handle: Handle, value: u32) {
+    pub fn init(&mut self, handle: Handle, data: u32) {
         if let Some(timer) = self.timers.get_mut(&handle) {
-            timer.value = value;
+            timer.data = data;
         }
     }
 
+    /// Starts the timer. If it is already running, the previous timeout is replaced.
     pub fn set(&mut self, handle: Handle, timeout: u32) {
+        let now = self.get_monotonic_timer();
         if let Some(timer) = self.timers.get_mut(&handle) {
-            timer.is_active = true;
-            js_schedule_event(timeout, timer.value as i32);
+            timer.deadline = Some(now + timeout as f64);
         }
     }
 
+    /// Stops the timer. An expiration that has not been delivered yet is cancelled.
     pub fn free(&mut self, handle: Handle) {
         if let Some(timer) = self.timers.get_mut(&handle) {
-            timer.is_active = false;
+            timer.deadline = None;
         }
     }
 
-    pub fn ack(&mut self, value: u32) {
-        for (_, timer) in self.timers.iter_mut() {
-            if timer.is_active && timer.value == value {
-                timer.is_active = false;
-                break;
+    /// Stops all expired timers and calls `f` with the data of each one, in order of expiration.
+    pub fn take_expired(&mut self, mut f: impl FnMut(u32)) {
+        let now = self.get_monotonic_timer();
+        let mut expired = Vec::new();
+        for timer in self.timers.values_mut() {
+            if let Some(deadline) = timer.deadline
+                && deadline <= now
+            {
+                timer.deadline = None;
+                expired.push((deadline, timer.data));
             }
         }
+        expired.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, data) in expired {
+            f(data);
+        }
+    }
+
+    /// Returns the time in milliseconds until the next timer expires, limited to `max`.
+    pub fn time_to_next(&self, max: u32) -> u32 {
+        let now = self.get_monotonic_timer();
+        self.timers
+            .values()
+            .filter_map(|timer| timer.deadline)
+            .map(|deadline| (deadline - now).ceil().max(0.0) as u32)
+            .fold(max, u32::min)
     }
 }

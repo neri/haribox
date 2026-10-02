@@ -21,32 +21,15 @@ pub mod prelude {
 
 #[wasm_bindgen(module = "env")]
 unsafe extern "C" {
-    fn js_open_window(width: u32, height: u32, title_ptr: *const u8, title_len: u32) -> u32;
+    fn js_open_window(width: u32, height: u32, title: &str) -> u32;
     fn js_move_window(window_id: u32, x: i32, y: i32);
     fn js_activate_window(window_id: u32);
     fn js_close_window(window_id: u32);
-    fn js_draw_image(
-        window_id: u32,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        ptr: *const u8,
-        len: u32,
-    );
-    fn js_print(text_ptr: *const u8, text_len: u32);
-    fn js_read_file_size(filename_ptr: *const u8, filename_len: u32) -> i32;
-    fn js_read_file_into(buf_ptr: *mut u8, buf_len: u32) -> i32;
-    fn js_write_file(
-        filename_ptr: *const u8,
-        filename_len: u32,
-        data_ptr: *const u8,
-        data_len: u32,
-        mode: u32,
-    ) -> i32;
-    fn js_get_keyboard_event(window_id: u32) -> i32;
+    fn js_draw_image(window_id: u32, x: u32, y: u32, width: u32, height: u32, pixels: &[u8]);
+    fn js_print(text: &str);
+    fn js_read_file(filename: &str) -> Option<Vec<u8>>;
+    fn js_write_file(filename: &str, data: &[u8], mode: u32) -> i32;
     fn js_get_tick() -> f64;
-    fn js_schedule_event(delay_ms: u32, event_code: i32);
     fn js_play_sound(frequency: u32);
 }
 
@@ -55,7 +38,7 @@ pub struct StdOut;
 impl core::fmt::Write for StdOut {
     #[inline]
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        js_print(s.as_ptr(), s.len() as u32);
+        js_print(s);
         Ok(())
     }
 }
@@ -103,31 +86,13 @@ enum WriteMode {
 /// Read a file from the filesystem. Returns `None` if not found.
 #[allow(dead_code)]
 fn rust_read_file(filename: &str) -> Option<Vec<u8>> {
-    let size = js_read_file_size(filename.as_ptr(), filename.len() as u32);
-    if size < 0 {
-        return None;
-    }
-    let mut buf = Vec::new();
-    buf.resize(size as usize, 0u8);
-    if size > 0 {
-        let read = js_read_file_into(buf.as_mut_ptr(), size as u32);
-        if read < 0 {
-            return None;
-        }
-    }
-    Some(buf)
+    js_read_file(filename)
 }
 
 /// Write data to a file with the given mode. Returns `true` on success.
 #[allow(dead_code)]
 fn rust_write_file(filename: &str, data: &[u8], mode: WriteMode) -> bool {
-    js_write_file(
-        filename.as_ptr(),
-        filename.len() as u32,
-        data.as_ptr(),
-        data.len() as u32,
-        mode as u32,
-    ) == 0
+    js_write_file(filename, data, mode as u32) == 0
 }
 
 /// Application instance
@@ -135,15 +100,12 @@ static mut APP: UnsafeCell<Option<App>> = UnsafeCell::new(None);
 
 /// Run task with parameters from the Worker
 #[wasm_bindgen]
-pub fn run_task(file_name: String, cmdline: String, title_bar_height: u32) {
+pub fn run_task(file_name: String, cmdline: String) {
     std::panic::set_hook(Box::new(|info| {
         panic2(info);
     }));
 
-    println!(
-        "[rust] run_task({:#?}, {:#?}, {:#?})",
-        file_name, cmdline, title_bar_height
-    );
+    println!("[rust] run_task({:#?}, {:#?})", file_name, cmdline);
 
     let mut binary = rust_read_file(&file_name).expect("Failed to read binary file");
 
@@ -158,7 +120,7 @@ pub fn run_task(file_name: String, cmdline: String, title_bar_height: u32) {
         };
     }
 
-    let Some(app) = App::instantiate(&binary, &cmdline, title_bar_height) else {
+    let Some(app) = App::instantiate(&binary, &cmdline) else {
         println!("Bad executable");
         return;
     };
@@ -169,20 +131,36 @@ pub fn run_task(file_name: String, cmdline: String, title_bar_height: u32) {
     }
 }
 
+/// Enqueue a key event from the Worker
+///
+/// `code` is the key code with the modifier state in bit 8-15.
 #[wasm_bindgen]
-pub fn r#loop() -> Result<i32, String> {
+pub fn push_key(code: u32) {
+    // Safety: We ensure that APP is only accessed in a single-threaded context.
+    let app = unsafe { (&mut *(&raw mut APP)).get_mut() };
+    if let Some(app) = app {
+        app.push_key(code);
+    }
+}
+
+/// Run the application until it yields
+///
+/// Returns the time in milliseconds to wait before the next call (0 to call again as soon as pending events
+/// have been delivered), or `None` if the application has exited.
+#[wasm_bindgen]
+pub fn step() -> Result<Option<u32>, String> {
     // Safety: We ensure that APP is only accessed in a single-threaded context.
     let app = unsafe { (&mut *(&raw mut APP)).get_mut() };
     if let Some(app) = app {
         match app.run() {
             Ok(status) => match status {
-                ExitStatus::Continue => Ok(0),
+                ExitStatus::Continue => Ok(Some(0)),
                 ExitStatus::Exit => {
                     app.dispose();
                     println!("[rust] run_task end");
-                    Ok(-1)
+                    Ok(None)
                 }
-                ExitStatus::Wait(code) => Ok(code),
+                ExitStatus::Wait(ms) => Ok(Some(ms)),
             },
             Err(err) => {
                 app.dispose();
@@ -190,6 +168,6 @@ pub fn r#loop() -> Result<i32, String> {
             }
         }
     } else {
-        Ok(-1)
+        Ok(None)
     }
 }

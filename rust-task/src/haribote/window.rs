@@ -85,7 +85,7 @@ impl HariWindow {
 
     /// Creates a new window with the specified `title` and `size`.
     ///
-    /// NOTE: The window buffer of Haribote OS includes the window frame and title bar, so it is necessary to adjust the window size considering the height of the host OS's title bar.
+    /// NOTE: The window buffer of Haribote OS includes the window frame and title bar. The host draws its own, so only the size of the area inside them is passed to the host.
     pub fn new(
         context: &App,
         buffer_ptr: u32,
@@ -95,14 +95,8 @@ impl HariWindow {
     ) -> Self {
         let title = title.to_str().unwrap_or("Untitled");
         let width = size.width - (Self::WINDOW_ADJUST_X * 2) as u32;
-        let height = size.height - (Self::WINDOW_ADJUST_TOP + Self::WINDOW_ADJUST_BOTTOM) as u32
-            + context.title_bar_height;
-        let window_id = WindowId(js_open_window(
-            width,
-            height,
-            title.as_ptr(),
-            title.len() as u32,
-        ));
+        let height = size.height - (Self::WINDOW_ADJUST_TOP + Self::WINDOW_ADJUST_BOTTOM) as u32;
+        let window_id = WindowId(js_open_window(width, height, title));
         let mut rgba_buffer = Vec::with_capacity((size.width * size.height * 4) as usize);
         rgba_buffer.resize((size.width * size.height * 4) as usize, 0);
 
@@ -244,8 +238,7 @@ impl HariWindow {
                 (clipped_left_top.y - Self::WINDOW_ADJUST_TOP) as u32,
                 width as u32,
                 height as u32,
-                rgba_buffer.as_ptr(),
-                rgba_buffer.len() as u32,
+                rgba_buffer,
             );
         }
     }

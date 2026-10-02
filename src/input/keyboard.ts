@@ -1,16 +1,17 @@
-import type { KeyboardEventMessage } from '../protocol';
+import type { KeyMessage } from '../protocol';
 import { closeMenu, isMenuOpen } from '../shell/taskbarWidgets';
 import { getWorkerByWindowId } from '../task/taskRunner';
 import { state } from '../wm/state';
 import { findWindowById } from '../wm/windowManager';
 import { applyModifierKey } from './modifiers';
+import { toTaskKeyCode } from './taskKeyCode';
 
 // Global modifier state management
 let modifierBitmap: number = 0;
 
 /**
  * Forward a key event to the Worker of the active Canvas window.
- * @returns true if the event was forwarded
+ * @returns true if the event belongs to the task (even if the key is not delivered to it)
  */
 const forwardToActiveCanvasTask = (event: KeyboardEvent, eventType: 'keydown' | 'keyup'): boolean => {
   // Update modifier bitmap
@@ -30,21 +31,14 @@ const forwardToActiveCanvasTask = (event: KeyboardEvent, eventType: 'keydown' | 
     return false;
   }
 
-  const keyboardEvent: KeyboardEventMessage = {
-    type: 'keyboardEvent',
-    windowId: state.activeWindowId,
-    eventType,
-    key: event.key,
-    code: event.code,
-    keyCode: event.keyCode,
-    ctrlKey: event.ctrlKey,
-    shiftKey: event.shiftKey,
-    altKey: event.altKey,
-    metaKey: event.metaKey,
-    isAutoRepeat: event.repeat,
-    modifierBitmap,
-  };
-  worker.postMessage(keyboardEvent);
+  // Only key presses are delivered to the task
+  if (eventType === 'keydown') {
+    const code = toTaskKeyCode(event.key, event.code, modifierBitmap);
+    if (code !== null) {
+      const keyMessage: KeyMessage = { type: 'key', code };
+      worker.postMessage(keyMessage);
+    }
+  }
   event.preventDefault();
   return true;
 };

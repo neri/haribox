@@ -321,16 +321,16 @@ const APP_IDS = {
     - 環境変数名に `=` が含まれない場合のみ、既存の環境変数値を表示
     - 例: `SET PATH_EXT` で現在の `PATH_EXT` 値を表示
   - `HELP`: 基本的なコマンドの一覧と簡単な説明を表示（掲載コマンド: VER, DIR, TYPE, NCST）
-  - `START <filename> [args...]`: ダミーターミナルでタスク実行（出力非表示）
+  - `START <filename> [args...]`: 出力先端末なしでタスク実行（出力非表示）
     - Rust タスクを起動するが、出力をターミナルに表示しない
     - 起動エラーは `console.error` にのみ出力される
     - パラメータは通常のタスク起動と同じ
     - 例: `START foo bar` → `foo.hrb` を起動、コマンドラインは `foo bar` として渡される
     - デフォルトターミナルへのフォールバック出力も行われない
-  - `NCST <filename> [args...]`: ダミーターミナルでタスク実行（出力非表示）
+  - `NCST <filename> [args...]`: 出力先端末なしでタスク実行（出力非表示）
     - START コマンドと完全に同じ動作
     - 例: `NCST foo bar` → `foo.hrb` を起動、コマンドラインは `foo bar` として渡される
-  - `OPEN <filename> [args...]`: START / NCST のエイリアス（ダミーターミナルでタスク実行、出力非表示）
+  - `OPEN <filename> [args...]`: START / NCST のエイリアス（出力先端末なしでタスク実行、出力非表示）
     - START と NCST と完全に同じ動作
 
 ### 4.3 未定義コマンド
@@ -342,7 +342,7 @@ const APP_IDS = {
     2. 存在しない場合、`PATH_EXT` 環境変数にある拡張子を先頭トークンに追加して検索
     3. `PATH_EXT` は `:` で区切られた拡張子リスト (例: `.hrb:.exe:.bin`)
     4. いずれかのパターンでファイルが見つかればそれを使用
-  - ファイルが見つかった場合、Worker を起動 (起動引数は `terminalWindowId`・`fileName`・`commandLine`)
+  - ファイルが見つかった場合、Worker を起動 (起動引数は `fileName`・`commandLine`。出力先端末は Main 側がタスクごとに保持する)
   - ファイルもコマンドも見つからない場合は「Bad command or file name」を表示
 
 ## 5. タスクバーウィンドウ一覧機能
@@ -464,16 +464,20 @@ const APP_IDS = {
 | `shell/` | デスクトップとタスクバーの DOM（`dom.ts`）、時計・スタートメニュー・音量 UI（`taskbarWidgets.ts`）、タスクバーボタン（`taskbar.ts`） |
 | `wm/` | ウィンドウの型と状態（`state.ts`）、操作（`windowManager.ts`）、描画とドラッグ（`render.ts`）、グループ化（`grouping.ts`）、種別レジストリ（`registry.ts`） |
 | `apps/` | ウィンドウ種別ごとの実装（terminal, canvas, fileManager, about, onboarding, textViewer）と、ドロップ取り込み + システムモーダル（`dropImport.ts`） |
-| `task/` | Worker の起動・追跡・後始末、Worker からのメッセージ処理、タスクに渡す環境変数 |
-| `input/` | 修飾キーの状態、Canvas へのキー転送 |
+| `task/` | Worker の起動・追跡・後始末、Worker からのメッセージ処理、環境変数 |
+| `input/` | 修飾キーの状態、タスク向けイベントコードへの変換、Canvas へのキー転送 |
 
 `fs/` と `audio/` は DOM に触れない。純粋なロジックには `*.test.ts`（vitest）を付ける。
 
 ### 6.2 Worker との通信プロトコル
 
-- Message passing による非同期通信
-- Rust コード内で js_* 関数呼び出し → Worker が main へメッセージ送信
-- main が対応する状態変更処理を実行 → Worker へ応答メッセージ返送
+- Message passing による非同期通信。メッセージの型は `protocol.ts` に定義し、両側が import する
+- Rust コード内で js_* 関数呼び出し → Worker が Main へメッセージ送信 → Main が対応する状態変更処理を実行
+- 応答メッセージはない。Rust への戻り値が必要なもの（ウィンドウのハンドル、ファイルの読み書きの結果）は、Worker が手元の状態だけで同期的に返す
+- Main → Worker は、タスクの起動、キー入力、ファイルシステムの変更、ウィンドウが閉じられたことの通知
+- Main はタスクごとの記録（Worker、出力先端末、音声の識別子）を持ち、メッセージの送信元 Worker からタスクを引く
+- タスクの終了（Worker の terminate）は Main が行う。最後の Canvas ウィンドウが閉じられたタスクも Main が終了させる
+- 詳細は [Rust/Wasmインターフェース](./rust-wasm-interface.md) を正本とする
 
 ### 6.3 localStorage による永続化
 

@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import { execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const resolveGitHash = (): string => {
     if (process.env.GITHUB_SHA) {
@@ -29,7 +30,7 @@ export default defineConfig(() => {
         },
         resolve: {
             alias: {
-                'env': new URL('./src/wasm/env.ts', import.meta.url).pathname,
+                'env': fileURLToPath(new URL('./src/wasm/env.ts', import.meta.url)),
             },
         },
         build: {

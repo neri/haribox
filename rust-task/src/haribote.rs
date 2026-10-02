@@ -1,5 +1,7 @@
 //! Haribote OS HLE kernel
 
+use alloc::collections::VecDeque;
+
 use ume86::gpr::PartialRegister;
 use ume86::prelude::*;
 use ume86::ume::{Exception, UME};
@@ -25,7 +27,6 @@ pub struct App {
     pub state: AppState,
     pub max_step: isize,
     pub lang_mode: LangMode,
-    pub title_bar_height: u32,
     pub emulator: UME,
     pub cmdline: String,
 
@@ -36,6 +37,7 @@ pub struct App {
     allocator: SimpleAllocator,
     files: FileManager,
     timers: TimerManager,
+    events: VecDeque<Event>,
     windows: Vec<HariWindow>,
 }
 
@@ -54,11 +56,23 @@ pub enum AppState {
     WaitKey(bool),
 }
 
+/// Event delivered to the application by `api_getkey`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    /// Key code with the modifier state in bit 8-15
+    Key(u32),
+    /// Data of the expired timer
+    Timer(u32),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitStatus {
+    /// Keep running without waiting
     Continue,
+    /// The application has exited
     Exit,
-    Wait(i32),
+    /// Resume after the specified time in milliseconds
+    Wait(u32),
 }
 
 impl App {
@@ -67,9 +81,10 @@ impl App {
 
     const OS_VER: u32 = 0;
 
-    const TIMER_ID_BIAS: u32 = 0x0001_0000;
+    /// Interval in milliseconds to poll for an event while the application is waiting for it
+    const POLL_INTERVAL_MS: u32 = 10;
 
-    pub fn instantiate(binary: &[u8], cmdline: &str, title_bar_height: u32) -> Option<Self> {
+    pub fn instantiate(binary: &[u8], cmdline: &str) -> Option<Self> {
         let Some(hrb) = hrb::HrbExecutable::identify(&binary) else {
             return None;
         };
@@ -112,12 +127,12 @@ impl App {
             state: AppState::Running,
             max_step: 1_000_000,
             lang_mode,
-            title_bar_height,
             cmdline: cmdline.to_string(),
             emulator,
             allocator: SimpleAllocator::new(),
             windows: Vec::new(),
             timers: TimerManager::new(),
+            events: VecDeque::new(),
             files: FileManager::new(),
             tsc_raw: 0,
             tsc_count: 0,
@@ -125,29 +140,35 @@ impl App {
         })
     }
 
-    /// Returns the adjusted keycode based on the input code and whether it's an extended key.
-    pub fn adjust_keycode(&mut self, code: i32, is_ex: bool) -> u32 {
-        if code == -1 {
-            return u32::MAX;
-        }
-        let code = code as u32;
-        if code > Self::TIMER_ID_BIAS {
-            self.timers.ack(code);
-            let timer_value = code - Self::TIMER_ID_BIAS;
-            timer_value
-        } else if is_ex {
-            code
-        } else {
-            let code = code & 0xff;
-            let code = match code {
+    /// Moves expired timers to the event queue.
+    fn pump_timers(&mut self) {
+        let events = &mut self.events;
+        self.timers
+            .take_expired(|data| events.push_back(Event::Timer(data)));
+    }
+
+    /// Enqueues a key event sent from the Worker.
+    pub fn push_key(&mut self, code: u32) {
+        // Timers that expired before this key must come first
+        self.pump_timers();
+        self.events.push_back(Event::Key(code));
+    }
+
+    /// Takes the next event and returns the value for `api_getkey`, or `u32::MAX` if there is none.
+    fn next_event(&mut self, is_ex: bool) -> u32 {
+        self.pump_timers();
+        match self.events.pop_front() {
+            None => u32::MAX,
+            Some(Event::Timer(data)) => data,
+            Some(Event::Key(code)) if is_ex => code,
+            Some(Event::Key(code)) => match code & 0xff {
                 0x84 => 0x34,       // Arrow Left
                 0x85 => 0x36,       // Arrow Right
                 0x86 => 0x38,       // Arrow Up
                 0x87 => 0x32,       // Arrow Down
                 0x80.. => u32::MAX, // Ignore other keys
-                _ => code,
-            };
-            code
+                code => code,
+            },
         }
     }
 
@@ -156,14 +177,16 @@ impl App {
         match self.state {
             AppState::Running => {}
             AppState::GetKey(is_ex) => {
-                let key = self.adjust_keycode(js_get_keyboard_event(0), is_ex);
+                let key = self.next_event(is_ex);
                 self.emulator.state().eax().write(key);
                 self.state = AppState::Running;
             }
             AppState::WaitKey(is_ex) => {
-                let key = self.adjust_keycode(js_get_keyboard_event(1), is_ex);
+                let key = self.next_event(is_ex);
                 if key == u32::MAX {
-                    return Ok(ExitStatus::Wait(10));
+                    // Wake up in time for the next timer
+                    let wait = self.timers.time_to_next(Self::POLL_INTERVAL_MS);
+                    return Ok(ExitStatus::Wait(wait));
                 } else {
                     self.emulator.state().eax().write(key);
                     self.state = AppState::Running;
@@ -451,7 +474,7 @@ impl App {
                 // timer: ebx, data: eax
                 self.timers.init(
                     Handle(self.emulator.state().ebx().read()),
-                    self.emulator.state().eax().read() + Self::TIMER_ID_BIAS,
+                    self.emulator.state().eax().read(),
                 );
             }
             18 => {

@@ -43,13 +43,18 @@ export const fileSystem = new Map<string, FileEntry>();
 let hasShownStorageWarning = false;
 let storageWarningHandler: ((message: string) => void) | null = null;
 
-const changeListeners = new Set<() => void>();
+/** One step of a change. A rename is reported as a remove followed by a put. */
+export type FileSystemChange = { type: 'put'; name: string; content: Uint8Array } | { type: 'remove'; name: string };
+
+type ChangeListener = (changes: readonly FileSystemChange[]) => void;
+
+const changeListeners = new Set<ChangeListener>();
 
 /**
  * Subscribes to file creation, update, deletion and rename.
  * @returns a function that removes the listener
  */
-export const onFileSystemChanged = (listener: () => void): (() => void) => {
+export const onFileSystemChanged = (listener: ChangeListener): (() => void) => {
   changeListeners.add(listener);
   return () => {
     changeListeners.delete(listener);
@@ -135,10 +140,10 @@ const persistFileSystem = (): void => {
 };
 
 // Saves the change and tells subscribers (file manager, running tasks) about it
-const commitChange = (): void => {
+const commitChange = (changes: readonly FileSystemChange[]): void => {
   persistFileSystem();
   for (const listener of changeListeners) {
-    listener();
+    listener(changes);
   }
 };
 
@@ -177,7 +182,7 @@ export const upsertFile = (rawName: string, content: Uint8Array): { ok: true; na
   const key = toCanonicalFileKey(name);
 
   fileSystem.set(key, { name, content, isInitialFile: false });
-  commitChange();
+  commitChange([{ type: 'put', name, content }]);
   return { ok: true, name };
 };
 
@@ -193,7 +198,7 @@ export const removeFile = (rawName: string): { ok: true; name: string } | { ok: 
     return { ok: false, reason: `File not found: ${rawName}` };
   }
   fileSystem.delete(key);
-  commitChange();
+  commitChange([{ type: 'remove', name }]);
   return { ok: true, name };
 };
 
@@ -227,7 +232,10 @@ export const renameFile = (
     content: sourceEntry.content,
     isInitialFile: false,
   });
-  commitChange();
+  commitChange([
+    { type: 'remove', name: source },
+    { type: 'put', name: destination, content: sourceEntry.content },
+  ]);
 
   return { ok: true, source, destination };
 };

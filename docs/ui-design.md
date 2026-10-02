@@ -308,13 +308,14 @@
 - コンテンツ領域は Canvas 要素
 - ウィンドウサイズとタイトルは Rust 側で指定
 - Canvas への描画は Rust 側が `js_draw_image` インターフェースで実施
+- タスクの最後の Canvas ウィンドウが閉じられると、そのタスクは終了する（詳細は [Rust/Wasmインターフェース](./rust-wasm-interface.md) の 4.3）
 
 **キーボード入力ハンドリング:**
-- Canvas ウィンドウがアクティブ（フォーカス）な時、すべてのキーボード入力イベント（keydown/keyup）を対応する Worker に転送
+- Canvas ウィンドウがアクティブ（フォーカス）な時、キーボード入力を対応する Worker に転送
 - Main スレッドで `document.addEventListener('keydown/keyup', ...)` で捕捉
-- アクティブウィンドウが Canvas 型かつ `workerByWindowId` に登録されている場合、`keyboardEvent` メッセージを Worker に `postMessage`
-- Worker は `keydown` をイベントコードへ変換してグローバルイベントキューに追加し、Rust 側は `js_get_keyboard_event()` で取得する
-- `keyup` はWorkerへ転送するが、イベントキューには追加しない
+- アクティブウィンドウが Canvas 型かつタスクのウィンドウとして登録されている場合、Main が `keydown` をイベントコードへ変換し、`key` メッセージを Worker に `postMessage`
+- Worker は受け取ったイベントコードを `push_key()` で Rust 側のイベントキューに追加する
+- `keyup` は Worker へ転送しない
 - 特殊キー・修飾キーを含むイベントコードの詳細は [Rust/Wasmインターフェース](./rust-wasm-interface.md) を正本とする
 - Canvas ウィンドウ以外がアクティブの場合、キーボード入力は転送されない
 

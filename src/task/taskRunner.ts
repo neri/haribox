@@ -1,22 +1,14 @@
 import { applyDrawImage, openRustWindow } from '../apps/canvas';
 import { appendTerminalLine, appendTerminalText, terminalOutputByWindow, terminalState } from '../apps/terminal/state';
 import { playSound, stopOscillator } from '../audio/audio';
-import { TITLE_BAR_HEIGHT } from '../constants';
 import { searchExecutableFile } from '../fs/fileAssoc';
-import { normalizeFileName, toCanonicalFileKey } from '../fs/fileName';
-import { createFileSystemSnapshot, fileSystem, onFileSystemChanged, upsertFile } from '../fs/fileSystem';
-import { WriteFileMode } from '../protocol';
-import type { UpdateFileSystemSnapshotMessage, WindowCloseMessage, WorkerCommand, WorkerStartMessage } from '../protocol';
+import { createFileSystemSnapshot, onFileSystemChanged, upsertFile } from '../fs/fileSystem';
+import type { FileSystemChange } from '../fs/fileSystem';
+import type { FileSystemChangeMessage, WindowCloseMessage, WorkerCommand, WorkerStartMessage } from '../protocol';
 import type { WindowId } from '../wm/state';
-import {
-  addWindowClosingListener,
-  bringToFrontIfNeeded,
-  closeWindow,
-  createWindowId,
-  setWindowPositionById,
-} from '../wm/windowManager';
+import { addWindowClosingListener, bringToFrontIfNeeded, closeWindow, setWindowPositionById } from '../wm/windowManager';
 
-// Environment variables passed to launched tasks. The terminal's SET command edits them.
+// Environment variables of the shell. The terminal's SET command edits them. They are not passed to tasks.
 export const env: Record<string, string> = {
   PATH_EXT: '.hrb',
 };
@@ -26,27 +18,45 @@ export const getPathExt = (): string => {
   return env['PATH_EXT'] ?? '.hrb';
 };
 
-const activeWorkers = new Set<Worker>();
-const workerByWindowId = new Map<WindowId, Worker>();
-const workerIdsByWorker = new Map<Worker, Set<string>>(); // Track workerId (for oscillators) by Worker
-const tasksSkipDefaultTerminalFallback = new Set<WindowId>();
-
-export const getWorkerByWindowId = (windowId: WindowId): Worker | undefined => {
-  return workerByWindowId.get(windowId);
+/** A running task. The worker never learns these; the main thread identifies the task by its worker. */
+type Task = {
+  worker: Worker;
+  /** Terminal the task was started from, or null for tasks without output display (START/NCST/OPEN) */
+  terminalWindowId: WindowId | null;
+  /** Key of the task's oscillator in audio.ts */
+  soundId: string;
+  /** Pending check that ends the task after its last window was closed */
+  windowlessTimer: number | null;
 };
 
-const broadcastFileSystemSnapshot = (): void => {
-  if (activeWorkers.size === 0) {
+// A task whose last Canvas window was closed is ended, unless it opens another window within this time
+const WINDOWLESS_GRACE_MS = 100;
+
+const activeTasks = new Set<Task>();
+const taskByWindowId = new Map<WindowId, Task>(); // Canvas windows opened by each task
+
+export const getWorkerByWindowId = (windowId: WindowId): Worker | undefined => {
+  return taskByWindowId.get(windowId)?.worker;
+};
+
+// Running tasks read files from their own copy, so every change is sent to them.
+// The task that made the change gets it too: that keeps its copy in the same order as the real file system.
+const broadcastFileSystemChanges = (changes: readonly FileSystemChange[]): void => {
+  if (activeTasks.size === 0) {
     return;
   }
 
-  const message: UpdateFileSystemSnapshotMessage = {
-    type: 'updateFileSystemSnapshot',
-    fileSystemSnapshot: createFileSystemSnapshot(),
+  const message: FileSystemChangeMessage = {
+    type: 'fileSystemChanged',
+    changes: changes.map((change) =>
+      change.type === 'put'
+        ? { type: 'put', name: change.name, content: change.content.slice().buffer }
+        : { type: 'remove', name: change.name },
+    ),
   };
 
-  for (const worker of activeWorkers) {
-    worker.postMessage(message);
+  for (const task of activeTasks) {
+    task.worker.postMessage(message);
   }
 };
 
@@ -54,13 +64,17 @@ const broadcastFileSystemSnapshot = (): void => {
  * Terminal that shows a task's output: the one it was started from, otherwise the default terminal.
  * No-display tasks (START/NCST/OPEN) never fall back to the default terminal.
  */
-const resolveOutputTerminal = (windowId: WindowId): WindowId | null => {
-  if (terminalOutputByWindow.has(windowId)) {
-    return windowId;
+const resolveOutputTerminal = (task: Task): WindowId | null => {
+  if (task.terminalWindowId === null) {
+    return null;
+  }
+
+  if (terminalOutputByWindow.has(task.terminalWindowId)) {
+    return task.terminalWindowId;
   }
 
   const defaultId = terminalState.defaultTerminalWindowId;
-  if (defaultId && terminalOutputByWindow.has(defaultId) && !tasksSkipDefaultTerminalFallback.has(windowId)) {
+  if (defaultId && terminalOutputByWindow.has(defaultId)) {
     return defaultId;
   }
 
@@ -75,12 +89,12 @@ const reportToDefaultTerminal = (text: string): void => {
   }
 };
 
-const handleWorkerCommand = (command: WorkerCommand, worker: Worker): void => {
+const handleWorkerCommand = (command: WorkerCommand, task: Task): void => {
   switch (command.type) {
     case 'openWindow':
       openRustWindow(command.windowId, command.width, command.height, command.title);
-      // Register Canvas window to Worker mapping when window is created
-      workerByWindowId.set(command.windowId, worker);
+      // Register Canvas window to task mapping when window is created
+      taskByWindowId.set(command.windowId, task);
       return;
     case 'moveWindow':
       setWindowPositionById(command.windowId, command.x, command.y);
@@ -95,45 +109,26 @@ const handleWorkerCommand = (command: WorkerCommand, worker: Worker): void => {
       applyDrawImage(command);
       return;
     case 'print': {
-      const terminalId = resolveOutputTerminal(command.windowId);
+      const terminalId = resolveOutputTerminal(task);
       if (terminalId) {
         appendTerminalText(terminalId, command.text);
       }
       return;
     }
     case 'println': {
-      const terminalId = resolveOutputTerminal(command.windowId);
+      const terminalId = resolveOutputTerminal(task);
       if (terminalId) {
         appendTerminalLine(terminalId, command.text);
       }
       return;
     }
-    case 'fileWritten': {
-      const normalizedResult = normalizeFileName(command.filename);
-      if (!normalizedResult.ok) {
-        return;
-      }
-      const exists = fileSystem.has(toCanonicalFileKey(normalizedResult.name));
-      if (command.mode === WriteFileMode.Update && !exists) {
-        return;
-      }
-      if (command.mode === WriteFileMode.Create && exists) {
-        return;
-      }
-      // Persists, then the change notification sends the new snapshot to all active workers
+    case 'fileWritten':
+      // Persists, then the change notification sends the change to all active workers
       upsertFile(command.filename, new Uint8Array(command.data));
       return;
-    }
-    case 'playSound': {
-      // Use the workerId from the worker to track oscillators
-      playSound(command.workerId, command.frequency, command.timestamp);
-      // Record this workerId for cleanup when the worker terminates
-      if (!workerIdsByWorker.has(worker)) {
-        workerIdsByWorker.set(worker, new Set());
-      }
-      workerIdsByWorker.get(worker)!.add(command.workerId);
+    case 'playSound':
+      playSound(task.soundId, command.frequency, command.timestamp);
       return;
-    }
     case 'error':
       console.error(`Rust worker error: ${command.message}`);
       return;
@@ -142,47 +137,71 @@ const handleWorkerCommand = (command: WorkerCommand, worker: Worker): void => {
   }
 };
 
-/** Releases everything held for a worker and terminates it. Used by every way a task can end. */
-const releaseWorker = (worker: Worker, terminalWindowId: WindowId): void => {
-  activeWorkers.delete(worker);
+/** Releases everything held for a task and terminates its worker. Used by every way a task can end. */
+const releaseTask = (task: Task): void => {
+  activeTasks.delete(task);
 
-  // Clean up all Oscillators created by this worker
-  const workerIds = workerIdsByWorker.get(worker);
-  if (workerIds) {
-    for (const workerId of workerIds) {
-      stopOscillator(workerId);
-    }
-    workerIdsByWorker.delete(worker);
-    console.log(`[Audio] Cleaned up ${workerIds.size} oscillator(s) for terminated worker`);
+  if (task.windowlessTimer !== null) {
+    clearTimeout(task.windowlessTimer);
+    task.windowlessTimer = null;
   }
 
-  // Clean up all Canvas window mappings for this worker
-  for (const [windowId, w] of workerByWindowId.entries()) {
-    if (w === worker) {
-      workerByWindowId.delete(windowId);
+  // Stop the sound the task may have left playing
+  stopOscillator(task.soundId);
+
+  // Clean up all Canvas window mappings for this task
+  for (const [windowId, t] of taskByWindowId.entries()) {
+    if (t === task) {
+      taskByWindowId.delete(windowId);
     }
   }
 
-  tasksSkipDefaultTerminalFallback.delete(terminalWindowId);
-  worker.terminate();
+  task.worker.terminate();
 };
 
-const startRustWorker = (startMessage: WorkerStartMessage): void => {
+const hasWindow = (task: Task): boolean => {
+  for (const owner of taskByWindowId.values()) {
+    if (owner === task) {
+      return true;
+    }
+  }
+  return false;
+};
+
+/**
+ * Ends the task if it still has no window after the grace period.
+ * This is decided here and not in the worker, so that it also works for a task that never yields.
+ */
+const scheduleWindowlessCheck = (task: Task): void => {
+  if (task.windowlessTimer !== null) {
+    clearTimeout(task.windowlessTimer);
+  }
+
+  task.windowlessTimer = window.setTimeout(() => {
+    task.windowlessTimer = null;
+    if (activeTasks.has(task) && !hasWindow(task)) {
+      releaseTask(task);
+    }
+  }, WINDOWLESS_GRACE_MS);
+};
+
+const startRustWorker = (terminalWindowId: WindowId | null, startMessage: WorkerStartMessage): void => {
   // Vite resolves this URL at build time, so it must stay a literal
   const worker = new Worker(new URL('../rustTask.worker.ts', import.meta.url), { type: 'module' });
-  activeWorkers.add(worker);
+  const task: Task = { worker, terminalWindowId, soundId: crypto.randomUUID(), windowlessTimer: null };
+  activeTasks.add(task);
 
   worker.addEventListener('message', (event: MessageEvent<WorkerCommand>) => {
-    handleWorkerCommand(event.data, worker);
+    handleWorkerCommand(event.data, task);
     if (event.data.type === 'done' || event.data.type === 'error') {
-      releaseWorker(worker, startMessage.terminalWindowId);
+      releaseTask(task);
     }
   });
   worker.addEventListener('error', (event) => {
     const errorMsg = `Worker error: ${event.error?.message ?? event.message ?? 'Unknown error'}`;
     console.error(errorMsg, event.error);
     reportToDefaultTerminal(`[worker error] ${errorMsg}`);
-    releaseWorker(worker, startMessage.terminalWindowId);
+    releaseTask(task);
   });
 
   try {
@@ -191,24 +210,29 @@ const startRustWorker = (startMessage: WorkerStartMessage): void => {
     const errorMsg = `Failed to start worker: ${error instanceof Error ? error.message : String(error)}`;
     console.error(errorMsg);
     reportToDefaultTerminal(`[worker] ${errorMsg}`);
-    releaseWorker(worker, startMessage.terminalWindowId);
+    releaseTask(task);
   }
 };
 
-export const launchRustTaskWithCommand = (terminalWindowId: WindowId, fileName: string, commandLine: string): void => {
-  startRustWorker({
+/**
+ * Launch Rust task. Its output goes to the given terminal, or to the default terminal if that one is gone.
+ * Pass null for no output display.
+ */
+export const launchRustTaskWithCommand = (
+  terminalWindowId: WindowId | null,
+  fileName: string,
+  commandLine: string,
+): void => {
+  startRustWorker(terminalWindowId, {
     type: 'startWithCommand',
-    titleBarHeight: TITLE_BAR_HEIGHT,
-    terminalWindowId,
     fileName,
     commandLine,
     fileSystemSnapshot: createFileSystemSnapshot(),
-    environmentVariables: env,
   });
 };
 
 /**
- * Launch Rust task with dummy terminal (no output display).
+ * Launch Rust task with no output display.
  * Errors are only logged to console.error
  */
 export const launchNoDisplayTask = (normalizedInput: string, tokens: string[]): void => {
@@ -227,29 +251,32 @@ export const launchNoDisplayTask = (normalizedInput: string, tokens: string[]): 
     return;
   }
 
-  const dummyWindowId = createWindowId();
-  tasksSkipDefaultTerminalFallback.add(dummyWindowId);
-  launchRustTaskWithCommand(dummyWindowId, fileName, commandLine);
+  launchRustTaskWithCommand(null, fileName, commandLine);
 };
 
 export const initTaskRunner = (): void => {
-  // Notify Worker if closing a Canvas window
+  // A Canvas window is closing, either by the user or by its task
   addWindowClosingListener((closingWindow) => {
     if (closingWindow.kind !== 'canvas') {
       return;
     }
 
-    const worker = workerByWindowId.get(closingWindow.id);
-    if (worker) {
-      const closeMessage: WindowCloseMessage = {
-        type: 'windowClose',
-        windowId: closingWindow.id,
-      };
-      worker.postMessage(closeMessage);
-      workerByWindowId.delete(closingWindow.id);
+    const task = taskByWindowId.get(closingWindow.id);
+    if (!task) {
+      return;
+    }
+
+    const closeMessage: WindowCloseMessage = {
+      type: 'windowClose',
+      windowId: closingWindow.id,
+    };
+    task.worker.postMessage(closeMessage);
+    taskByWindowId.delete(closingWindow.id);
+
+    if (!hasWindow(task)) {
+      scheduleWindowlessCheck(task);
     }
   });
 
-  // Running tasks read files from their own snapshot, so every change is sent to them
-  onFileSystemChanged(broadcastFileSystemSnapshot);
+  onFileSystemChanged(broadcastFileSystemChanges);
 };

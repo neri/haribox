@@ -125,6 +125,7 @@ const createCanvas = (win: WindowModel): HTMLCanvasElement => {
   return canvas;
 };
 
+/** Opens a canvas window for a task. width and height are the size of the canvas, without the title bar */
 export const openRustWindow = (windowId: WindowId, width: number, height: number, title: string): void => {
   const existing = findWindowById(windowId);
   if (existing) {
@@ -133,7 +134,7 @@ export const openRustWindow = (windowId: WindowId, width: number, height: number
   }
 
   const actualWidth = Math.max(TITLE_BAR_HEIGHT * 4, width);
-  const actualHeight = Math.max(TITLE_BAR_HEIGHT + 20, height);
+  const actualHeight = Math.max(TITLE_BAR_HEIGHT + 20, height + TITLE_BAR_HEIGHT);
   const centered = getCenteredWindowPosition(actualWidth, actualHeight);
 
   const windowModel: WindowModel = {

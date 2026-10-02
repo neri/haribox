@@ -9,54 +9,62 @@
 
 ---
 
-## 1. Rust タスク実装方針
+## 1. Rust タスクの構成
 
-**現在の実装状況:**
-- Rust タスク (`run_task`) は主にテスト・デバッグ用のメッセージログとダミー Canvas 描画が中心
-- Window API、Canvas 描画、ファイル I/O のインターフェースは動作確認済み
-- println/print による端末への出力が正常に機能
+Rust タスク（`rust-task/`）は、Haribote OS のアプリケーション（`.hrb`）を Worker 上で実行する。1 つのタスクが 1 つの Worker と 1 つの Wasm インスタンスを持つ。
 
-**将来の拡張予定:**
-- より複雑なアプリケーション実装（画像処理、音声処理、ゲーム等）
-- インタラクティブな入力処理（キーボード・マウスイベント）
-- Canvas への高頻度描画（アニメーション・ゲームループ）
-- Worker 間通信や複数タスクの同時実行
-- 外部 Rust クレート（image, audio 等）の統合
+- **実行方式**: x86 命令をエミュレータ（`lib/ume86`、命令デコードは `lib/ir86`）で実行し、Haribote OS の API 呼び出し（`INT 0x40`）を Rust 側で処理する（HLE）
+- **実行ファイル**: HRB 形式（`lib/hrb`）。tek 圧縮されていれば展開してから読み込む（`lib/tek`）
+- **API の実装**: `rust-task/src/haribote.rs` の `handle_syscall`。ウィンドウ（`window.rs`）、タイマー（`timer.rs`）、ファイル（`file.rs`）、日本語表示（`lang.rs`、フォントは `nihongo.fnt`）、メモリ確保（`malloc.rs`）に分かれる
+- **ホストとの境界**: 画面・ファイル・音・時刻は、3 章の JavaScript 関数を通じて Worker に依頼する。キー入力は Worker から `push_key` で受け取る
 
-現在のインターフェース設計は、これらの将来拡張を想定した設計となっており、既存インターフェースの互換性を保ちつつ拡張可能な構造になっています。
+タスクは協調的に動く。`step()` を 1 回呼ぶと、アプリが待ちに入る（キー待ち、キーの確認）か終了するまで実行して戻る。待ちに入らずに計算を続けるアプリは `step()` から戻らない（2 章の `step()` と 4.3 を参照）。
 
 ## 2. Rust エントリポイント関数
 
-### `run_task(file_name, command_line, title_bar_height)`
+### `run_task(file_name, command_line)`
 - wasm_bindgen でエクスポートされたメイン実行関数
-- Worker から起動される正式なエントリポイント
+- Worker から起動される正式なエントリポイント。実行ファイルを読み込み、アプリを実行できる状態にする（実行自体は `step()` で進める）
 - パラメータ:
   - `file_name: String`: 実行対象ファイルの名前
   - `command_line: String`: 完全なコマンドライン文字列
-  - `title_bar_height: u32`: ウィンドウタイトルバーの高さ（ピクセル）
-- Worker の起動時に自動的に呼び出される
-- `title_bar_height` は UI の `TITLE_BAR_HEIGHT` 定数値（通常 32px）で、Rust アプリケーションがウィンドウレイアウト計算時に参照可能
+- Worker が `startWithCommand` を受け取ったときに 1 回呼び出す
+- 実行ファイルを読めない・HRB 形式でない場合はメッセージを出力して戻る。この場合、最初の `step()` が終了（`None`）を返す
+
+### `step() -> Option<u32>`
+- タスクを次に待ちが必要になるまで実行する。Worker が繰り返し呼び出す
+- 戻り値: 次の呼び出しまでに待つ時間（ミリ秒）。タスクが終了した場合は `None`（JS 側は `undefined`）
+  - キーまたはタイマー待ちの間は、次のタイマー満了までの時間（最大 10 ミリ秒）を返す
+  - `0` は「溜まっているメッセージを処理したらすぐに再開する」を表す（`api_getkey(0)` の場合）
+- Worker は 0 より大きい値なら `setTimeout` で待ち、`0` なら `MessageChannel` で一度イベントループに戻ってから再開する。入れ子の `setTimeout(0)` は最低 4 ミリ秒待たされるため、`0` には使わない
+- タスクは `step()` から戻るまで Worker を占有する。キーの取得（`api_getkey` / `api_getkeyEx`）を呼ばずに計算し続けるアプリは、その間キー入力やファイルシステムの変更を受け取れない。ウィンドウを閉じたときの終了は Main が行うので、この場合も終了できる（4.3 を参照）
+
+### `push_key(code)`
+- Worker がキーボードイベントを Rust 側のイベントキューへ追加するために呼び出す
+- `code`: イベントコード（下位 8 ビットがキーコード、ビット 8～15 が修飾キー状態）。形式は 5.2 を参照
+- `run_task` の完了後から、タスク終了までの間だけ呼び出せる
 
 ## 3. Rust から利用するインターフェース
 
 Rust 側は以下の JavaScript 関数を `#[wasm_bindgen(module = "env")]` 経由で呼び出します：
 
 実装の詳細:
-- `src/wasm/env.ts` が `env` モジュールとして提供される
-- Worker (`rustTask.worker.ts`) が `createWasmEnv()` で実装関数を作成し、`globalThis.wasmEnv` へ登録
-- `env.ts` の各関数が `globalThis.wasmEnv` を参照して実装へ委譲
+- `src/wasm/env.ts` が `env` モジュールとして提供される（`vite.config.ts` の alias で解決）。各関数の実装もこのファイルにある
+- Worker (`rustTask.worker.ts`) が状態（`HostState`）を作成し、Wasm モジュールを読み込む前に `initHost()` で `env.ts` へ登録
+- Worker と `env.ts` は同じ状態オブジェクトを共有する（ウィンドウ ID 対応表、ファイルシステムなど）
+- 文字列は `&str`、バイト列は `&[u8]` / `Option<Vec<u8>>` で宣言し、Wasm メモリとの変換は wasm-bindgen の生成コードに任せる。`env.ts` 側は `string` / `Uint8Array` を受け取る
+- `&[u8]` で受け取る `Uint8Array` は Wasm メモリへのビューで、呼び出し中しか有効でない。`postMessage` や保持の前に必ずコピーする
 
 **インターフェース更新時の注意:**
 - Rust 側で新しいインターフェース関数を追加する場合（`lib.rs` の `#[wasm_bindgen(module = "env")]` に追加）、以下を同時に更新必須：
-  - `rustTask.worker.ts` の `WasmEnv` 型定義に関数シグネチャを追加
-  - `rustTask.worker.ts` の `createWasmEnv()` 内に実装を追加
-  - `src/wasm/env.ts` にエクスポート関数を追加（委譲）
+  - `src/wasm/env.ts` に同名のエクスポート関数を実装
   - 本設計書にドキュメント記載
 
 ### 3.1 ウィンドウ管理インターフェース
 
-- `js_open_window(width, height, title_ptr, title_len) -> u32`
+- `js_open_window(width, height, title) -> u32`
   - Rust 側が指定したサイズ・タイトルでウィンドウを新規作成
+  - `width`, `height` は描画領域（Canvas）のサイズ。タイトルバーや枠は含めず、Main がタイトルバーの高さを足してウィンドウを作る
   - Worker が Rust 数値ハンドルを採番し、戻り値として Rust 側へ返却
   - Worker 内で Rust 数値ハンドルと UI UUID を関連付ける
 - `js_move_window(window_id, x, y)`
@@ -65,153 +73,135 @@ Rust 側は以下の JavaScript 関数を `#[wasm_bindgen(module = "env")]` 経�
   - 指定ハンドルに対応するウィンドウをアクティブ化
 - `js_close_window(window_id)`
   - 指定ハンドルに対応するウィンドウを閉じる
+- すでに閉じられたウィンドウのハンドルを指定した操作は無視する（ユーザーが閉じた後も Rust 側はハンドルを持ち続けるため）
 
 ### 3.2 描画インターフェース
 
-- `js_draw_image(window_id, x, y, width, height, ptr, len)`
+- `js_draw_image(window_id, x, y, width, height, pixels)`
   - 指定ハンドルに対応するウィンドウの Canvas の指定矩形領域に RGBA imageData を描画
   - パラメータ:
     - `x`, `y`: 描画開始位置 (Canvas 内の座標)
     - `width`, `height`: 描画サイズ (ピクセル)
+    - `pixels`: RGBA データ (`width * height * 4` バイト)
 
 ### 3.3 ターミナル出力インターフェース
 
-- `js_print(text_ptr, text_len)`
+- `js_print(text)`
   - Rust から Worker の `js_print` を呼び、Main の端末出力へテキストを追記する (改行なし)
-  - 出力先端末は Worker 起動引数の `terminalWindowId` を使用する
+  - 出力先端末は Main が決める（4.2 の `print` を参照）
 
 ### 3.4 ファイルI/Oインターフェース
 
-- `js_read_file_size(filename_ptr, filename_len) -> i32`
-  - 指定ファイル名のファイルサイズをバイトで返す
-  - ファイルが存在しない場合は負値を返す
-  - ファイル名照合は大文字小文字を区別しない
-- `js_read_file_into(buf_ptr, buf_len) -> i32`
-  - 前回の `js_read_file_size` で取得したファイル内容をバッファへ読み込む
-  - 読み込んだバイト数を返す
-- `js_write_file(filename_ptr, filename_len, data_ptr, data_len, mode) -> i32`
+- `js_read_file(filename) -> Option<Vec<u8>>`
+  - 指定ファイル名のファイル内容を返す
+  - ファイルが存在しない場合は `None`（JS 側は `undefined`）を返す
+  - ファイル名は Main と同じ規則で正規化してから照合する。大文字小文字は区別しない
+- `js_write_file(filename, data, mode) -> i32`
   - 指定ファイル名でファイル内容を書き込む
   - `mode` は以下の値：
     - `0`: update (存在する場合は上書き、存在しない場合はエラー)
     - `1`: create (存在しない場合は新規作成、存在する場合はエラー)
     - `2`: upsert (存在する場合は上書き、存在しない場合は新規作成)
-  - 成功時は 0 を返す
+  - 成功時は 0、失敗時は負値を返す。ファイル名を正規化できない場合と、`mode` の条件を満たさない場合に失敗する
+  - 成否は Worker が手元のファイルシステムのコピーで判定する（[ファイルシステム](./filesystem.md) の 1.4 を参照）
 
-### 3.5 イベントとタイマーインターフェース
+### 3.5 時刻インターフェース
 
-- `js_get_keyboard_event(window_id) -> i32`
-  - Worker のグローバルイベントキューから次のキーボードイベントをデキュー
-  - 戻り値: イベントコード（文字キーの場合は ASCIIコード、キューが空の場合は -1）
-  - `window_id` パラメータは受け付けるが、すべてのウィンドウが同一グローバルキューを共有するため、キュー特定には使用されない
-  - 詳細は 5章 を参照
 - `js_get_tick() -> f64`
   - Worker 初期化からの経過時間をミリ秒単位で返す
   - Worker 起動時に `performance.now()` を記録し、現在の `performance.now()` との差分を計算
   - 戻り値: 経過時間（ミリ秒、小数値）
-  - 用途: Rust タスク内でタイマー・フレームスキップ・アニメーション制御等に使用
-- `js_schedule_event(delay_ms, event_code)`
-  - 指定時間後にイベントコードをイベントキューにエンキュー
-  - `setTimeout` を使用して遅延実行を実現
-  - パラメータ:
-    - `delay_ms`: 遅延時間（ミリ秒）
-    - `event_code`: エンキューするイベントコード（通常は ASCIIコードまたは特殊キーコード）
-  - 用途: Rust タスク内でスケジュール化されたイベント（タイマーイベント等）を生成
+  - 用途: Rust タスク内でタイマーの満了判定・フレームスキップ・アニメーション制御等に使用
+
+イベントキューとタイマーは Rust 側で管理するため、JavaScript 側にイベント取得やタイマー予約の関数はない。詳細は 5.2 を参照。
+
+### 3.6 音声インターフェース
+
+- `js_play_sound(frequency)`
+  - 指定した周波数（Hz）の音を鳴らす。`0` を指定すると止める
+  - 音はタスクごとに 1 つで、鳴っている間に呼ぶと周波数を切り替える
+  - `api_beep` から呼ばれる
 
 ## 4. Worker と Main のメッセージインターフェース
+
+メッセージの型は `src/protocol.ts` に定義し、Main（`task/taskRunner.ts`、`input/keyboard.ts`）と Worker（`rustTask.worker.ts`、`wasm/env.ts`）の両方が import する。Main → Worker は `MainToWorkerMessage`、Worker → Main は `WorkerCommand`。メッセージを追加・変更するときはこのファイルを直す。
 
 ### 4.1 Main → Worker (Main が Worker へ送信するメッセージ)
 
 - `startWithCommand`
   - Worker 起動時に Main から送信されるメッセージ
-  - 起動引数：`terminalWindowId`、`fileName`、`commandLine`、`titleBarHeight`、`fileSystemSnapshot`、`environmentVariables`
-  - `titleBarHeight`: UI の `TITLE_BAR_HEIGHT` 定数値（通常 32px）
+  - 起動引数：`fileName`、`commandLine`、`fileSystemSnapshot`
+  - 環境変数（`SET` で設定するもの）は Main 側だけが使い、タスクには渡さない
+  - 出力先端末や音声の識別子は渡さない。Main がタスクごとの記録（`taskRunner.ts` の `Task`）に持ち、メッセージの送信元 Worker から引く
 
-- `keyboardEvent(windowId, eventType, key, code, keyCode, ctrlKey, shiftKey, altKey, metaKey, isAutoRepeat, modifierBitmap)`
-  - Canvas ウィンドウがアクティブ時、キーボード入力イベントを Worker に転送
-  - Main スレッドで Canvas ウィンドウの keydown/keyup イベントを捕捉し、アクティブウィンドウ判定後に転送
-  - パラメータ:
-    - `windowId`: 入力先CanvasウィンドウのUI UUID
-    - `eventType`: 'keydown' | 'keyup'
-    - `key`: キーの文字表現 (e.g., 'a', 'Enter', 'ArrowUp')
-    - `code`: キーボード位置コード (e.g., 'KeyA', 'Enter', 'ArrowUp')
-    - `keyCode`: 数値キーコード（廃止予定だが互換性のため含める）
-    - `ctrlKey`, `shiftKey`, `altKey`, `metaKey`: 修飾キー状態（boolean）
-    - `isAutoRepeat`: キーホールド時の自動リピート状態（boolean）
-    - `modifierBitmap`: 左右を区別するUSB HID形式の修飾キー状態
-  - Worker は `keydown` をイベントコードへ変換してキューに追加する。`keyup` はキューへ追加しない
+- `key(code)`
+  - Canvas ウィンドウがアクティブな時に押されたキーを Worker に転送
+  - `code`: イベントコード（下位 8 ビットがキーコード、ビット 8～15 が修飾キー状態）。形式は 5.2 を参照
+  - DOM のキーイベントからイベントコードへの変換は Main が行う（`src/input/taskKeyCode.ts`）。タスクに届けないキー（修飾キー単体、ファンクションキー、非 ASCII 文字など）と `keyup` は送らない
+  - Worker は受け取った `code` をそのまま `push_key(code)` で Rust 側のイベントキューに追加する
   - Canvas ウィンドウ以外がアクティブの場合、転送されない
 
-- `updateFileSystemSnapshot(fileSystemSnapshot)`
-  - 複数 Worker 同時実行時、ファイルシステムが変更された際に Main から配信
-  - Worker が `js_write_file` でファイルを書き込む
-    ↓
-  - Main がファイルシステムを更新して localStorage へ永続化
-    ↓
-  - Main が全アクティブ Worker に本メッセージを配信
-  - Worker はスナップショットを受け取り、内部の fileSystem を更新
-  - その後の `js_read_file_*` 呼び出しで、他の Worker の書き込み内容が読める
+- `fileSystemChanged(changes)`
+  - ファイルシステムが変更された際に、Main から全アクティブ Worker へ配信する
+  - `changes`: 変更の配列。各要素は `{ type: 'put', name, content }`（作成・上書き）または `{ type: 'remove', name }`（削除）。名前変更は remove と put の 2 件
+  - 送るのは変更分だけで、全ファイルは送らない（全ファイルを送るのは `startWithCommand` のスナップショットだけ）
+  - Worker は手元のコピーに順に反映する。その後の `js_read_file` 呼び出しで、他の Worker の書き込み内容が読める
+  - 書き込んだ Worker 自身にも届く。詳細は [ファイルシステム](./filesystem.md) の 1.4 を参照
 
 - `windowClose(windowId)`
-  - Canvas ウィンドウのクローズボタン押下時、Main から Worker に通知
+  - Canvas ウィンドウが閉じられたことを、そのウィンドウを開いたタスクの Worker に通知する。ユーザーがクローズボタンで閉じた場合も、タスクが `js_close_window` で閉じた場合も送る
   - パラメータ:
-    - `windowId`: クローズするウィンドウの UUID
-  - Worker の処理フロー:
-    1. `windowIdMap` から対応する数値ハンドルを逆検索
-    2. 数値ハンドルと UUID のマッピングを削除（クリーンアップ）
-    3. `windowIdMap.size === 0` （すべてのウィンドウが閉じられた）の判定
-    4. 全ウィンドウ閉じられた場合、100ミリ秒のタイマーをセット
-    5. タイマー経過後、再度 `windowIdMap.size === 0` を確認
-    6. 依然としてウィンドウが存在しない場合、Worker は終了（`done` メッセージを Main に送信）
-    7. タイマー待機中に新しいウィンドウが開かれた場合は、Worker は継続実行
-  - 用途: Rust タスク内でウィンドウクローズイベントを検出し、適切にリソースをクリーンアップして終了する
+    - `windowId`: 閉じられたウィンドウの UUID
+  - Worker は数値ハンドルと UUID の対応を削除する。以後そのハンドルへの操作（描画など）は Main へ送らない
+  - Rust 側には伝えない。Haribote OS にはウィンドウが閉じられたことをアプリへ知らせる API がない
+  - タスクを終了するかどうかは Main が決める（4.3 を参照）。Worker はこのメッセージで終了しない
 
 ### 4.2 Worker → Main (Worker が Main へ送信するメッセージ)
 
 - `done`
-  - Worker がタスク完了または終了する際に Main へ通知
+  - タスクが終了したことを Main へ通知
   - パラメータなし
-  - 送信契機:
-    1. Rust タスクの main ルーチンが正常に終了（全ウィンドウが閉じられた後、2秒タイマーで確認）
-    2. Rust タスクが処理フロー完了
-  - Main の処理:
-    - Worker スレッドを終了
-    - Worker インスタンスをクリーンアップ
-    - 関連する UI（ターミナルウィンドウ等）を適切に状態更新
+  - 送信契機: `step()` が終了（`None`）を返したとき
+    - アプリが `api_end` を呼んだ
+    - 未対応の API を呼んだ
+    - `run_task` が実行ファイルを読み込めなかった
+  - アプリが開いていたウィンドウは、終了時に Rust 側が `js_close_window` ですべて閉じる
+  - Main の処理: タスクを解放する（4.3 を参照）
 
 - `error(message, stack)`
-  - Worker でエラーが発生した際に Main へ通知
+  - Worker でエラーが発生したことを Main へ通知
   - パラメータ:
     - `message`: エラーメッセージ文字列
     - `stack`: スタックトレース（オプション）
   - 発生契機:
     - WASM モジュール読み込み失敗
     - WASM ランタイム初期化失敗
-    - Rust タスク実行エラー
-    - 予期しない例外発生
-  - Main の処理:
-    - エラーをターミナルに出力
-    - Worker を終了
-    - ユーザーへのエラー通知
+    - アプリの実行時例外（不正な命令、範囲外のメモリアクセスなど）や Rust 側の panic
+  - Worker は送信前に、エラーメッセージを `println` でタスクの出力先端末へ出す
+  - Main の処理: `console.error` に記録し、タスクを解放する（4.3 を参照）
 
-- `fileWritten(filename, data, mode)`
+- `fileWritten(filename, data)`
   - Worker が `js_write_file` でファイルを書き込んだ際、Main へ通知
   - パラメータ:
-    - `filename`: 書き込みされたファイル名
+    - `filename`: 書き込みされたファイル名（Worker が正規化した後の名前）
     - `data`: 書き込み内容の `ArrayBuffer`
-    - `mode`: `js_write_file` の `mode` と同じ数値（`0`: update / `1`: create / `2`: upsert）
+  - 名前の検証と書き込みモードの判定は Worker が済ませている。Main は再判定しない
   - Main の処理:
-    - `mode` を検証してファイルシステムを更新し、localStorage へ永続化
-    - 複数 Worker 同時実行時は、全 Worker に `updateFileSystemSnapshot` メッセージで配信
+    - ファイルシステムを更新し、localStorage へ永続化
+    - 全アクティブ Worker に `fileSystemChanged` で配信
 
-- `println(windowId, text)`
+- `println(text)`
   - Worker から Main へ改行付きテキスト出力要求を送る
-  - Main は指定 `windowId` の端末画面へ `text` を 1 行追加する
-  - `windowId` が端末として存在しない場合は無視する
+  - Main は送信元タスクの出力先端末へ `text` を 1 行追加する
+  - 出力先は、タスクを起動した端末。その端末が閉じられていれば既定の端末。出力なしで起動したタスク（START/NCST/OPEN）や、端末が 1 つも無い場合は無視する
 
-- `print(windowId, text)`
+- `print(text)`
   - Worker から Main へ改行なしテキスト出力要求を送る
-  - Main は指定 `windowId` の端末画面の現在行末へ `text` を追記する
-  - `windowId` が端末として存在しない場合は無視する
+  - Main は送信元タスクの出力先端末の現在行末へ `text` を追記する（出力先の決め方は `println` と同じ）
+
+- `playSound(frequency, timestamp)`
+  - Rust の `js_play_sound` を Main へ伝える。`frequency` が 0 なら停止
+  - 音はタスクごとに 1 つ。Main が送信元タスクのオシレーターを切り替え、タスク終了時に停止する
 
 - `drawImage(windowId, x, y, width, height, pixels)`
   - Worker から Main へ Canvas への画像描画要求を送る
@@ -221,9 +211,35 @@ Rust 側は以下の JavaScript 関数を `#[wasm_bindgen(module = "env")]` 経�
     - `x`, `y`: 描画開始位置 (Canvas 内の座標)
     - `width`: 画像幅 (ピクセル)
     - `height`: 画像高さ (ピクセル)
-    - `pixels`: RGBA データ (Uint8Array、各ピクセルが RGBA で 4 バイト)
+    - `pixels`: RGBA データ (`ArrayBuffer`、各ピクセルが RGBA で 4 バイト)
+  - Worker は Wasm メモリから 1 回だけコピーし、そのバッファを transfer で Main に渡す（`postMessage` での複製はしない）
   - Main は指定ウィンドウの Canvas に `putImageData` で指定座標へ描画
   - `windowId` が Canvas ウィンドウとして存在しない場合は無視する
+
+### 4.3 タスクの終了
+
+タスクの終了は、すべて Main の `releaseTask`（`task/taskRunner.ts`）を通る。`releaseTask` は Worker を terminate し、タスクが鳴らしていた音を止め、ウィンドウとの対応を消す。`releaseTask` 自体は Canvas ウィンドウを閉じない（正常終了ではアプリ側が先に閉じている。`error` で終了した場合はウィンドウが残る）。
+
+終了の契機は次の 4 つ。
+
+| 契機 | 判定する側 |
+|---|---|
+| `done` を受け取った（アプリが終了した） | Worker |
+| `error` を受け取った | Worker |
+| Worker の `error` イベント（スクリプトを読み込めない、捕捉されない例外など） | Main |
+| 最後の Canvas ウィンドウが閉じられた | Main |
+
+**最後のウィンドウが閉じられたとき**:
+
+1. Canvas ウィンドウが閉じられる（ユーザーの操作、またはタスクの `js_close_window`）
+2. Main がそのタスクのウィンドウが 1 つも残っていないことを確認し、100 ミリ秒のタイマーを張る
+3. タイマーが満了した時点で、タスクがまだウィンドウを持っていなければ `releaseTask` する
+4. 待っている間にタスクが新しいウィンドウを開いていれば、タスクは継続する
+
+- 100 ミリ秒の猶予は、ウィンドウを閉じてすぐ開き直すアプリを終了させないためのもの
+- 判定を Main に置いているのは、`step()` から戻らないタスクでも終了できるようにするため。Worker 側で判定すると、応答しないタスクは `windowClose` を処理できず、ウィンドウが消えても動き続ける
+- 一度もウィンドウを開いていないタスク（ターミナルに出力するだけのアプリ）は、この判定の対象にならない。`done` か `error` まで動き続ける
+- 複数のウィンドウのうち一部だけが閉じられた場合、タスクは継続する
 
 ## 5. Canvas ウィンドウのキーボード入力処理
 
@@ -241,46 +257,25 @@ Rust 側は以下の JavaScript 関数を `#[wasm_bindgen(module = "env")]` 経�
    - ウィンドウの `kind` が `'canvas'` であるか確認
 
 3. **Main スレッド - Worker 検索**：
-   - `workerByWindowId.get(state.activeWindowId)` で対応する Worker を検索
+   - `getWorkerByWindowId(state.activeWindowId)` で対応する Worker を検索
    - Canvas ウィンドウが `js_open_window` FFI で生成された時に自動登録される
    - Worker が見つからない場合は処理を中断
 
-4. **Main スレッド - キーボードイベント転送**：
-   - 見つかった Worker に `keyboardEvent` メッセージを `postMessage` で送信
-   - メッセージ形式:
-     ```typescript
-     {
-       type: 'keyboardEvent',
-       windowId: 'uuid-string',  // Canvas ウィンドウの UUID
-       eventType: 'keydown',  // or 'keyup'
-       key: 'a',              // キーの文字表現
-       code: 'KeyA',          // キーボード位置コード
-       keyCode: 65,           // 数値コード（互換性用）
-       ctrlKey: false,
-       shiftKey: false,
-       altKey: false,
-       metaKey: false,
-       isAutoRepeat: false,
-       modifierBitmap: 0
-     }
-     ```
-   - `event.preventDefault()` でブラウザのデフォルト動作を抑止
-   - keydown と keyup の両イベントを送信
+4. **Main スレッド - イベントコードへの変換と転送**：
+   - `keydown` のとき、`toTaskKeyCode(key, code, modifierBitmap)` でイベントコードへ変換する
+     - 印字可能ASCII文字（`0x20`～`0x7e`）は文字コード
+     - Backspace、Enter、Esc、PageUp/PageDown、Home/End、矢印、Insert、Delete は定義済みの特殊キーコード
+     - 修飾キー状態（`modifierBitmap`）を上位8ビットにエンコードする。ビットの対応は後述の「イベントコード形式」を参照
+     - それ以外のキーは変換結果なし（送信しない）
+   - 変換できた場合、Worker に `{ type: 'key', code }` を `postMessage` で送信
+   - `keyup` は修飾キー状態の更新にだけ使い、Worker へは送らない
+   - 送信の有無にかかわらず、`event.preventDefault()` でブラウザのデフォルト動作を抑止
 
-5. **Worker スレッド - キーボードイベント受信**：
-   - `self.addEventListener('message', (event) => {...})`
-   - `event.data.type === 'keyboardEvent'` で受信判定
-   - `handleKeyboardEvent()` 関数を呼び出し
+5. **Worker スレッド - イベントキューへの追加**：
+   - `key` メッセージを受け取り、`push_key(code)` で Rust 側のイベントキューに追加する
 
-6. **Worker スレッド - イベント処理**：
-   - `keydown` のみをイベントキューに追加し、`keyup` は追加しない
-   - 印字可能ASCII文字（`0x20`～`0x7e`）は文字コードを追加する
-   - Backspace、Enter、Esc、PageUp/PageDown、Home/End、矢印、Insert、Delete は定義済みの特殊キーコードを追加する
-   - `modifierBitmap` を上位8ビットにエンコードする。ビットの対応は後述の「イベントコード形式」を参照
-
-7. **Rust タスク - イベント取得**：
-   - Rust タスクは `js_get_keyboard_event(window_id)` を呼び、Workerのグローバルキューから次のイベントを取得する
-   - `window_id` は互換性のための引数であり、キューの選択には使用しない
+6. **Rust タスク - イベント取得**：
+   - `api_getkey` / `api_getkeyEx` の処理時に、Rust 側のイベントキューから次のイベントを取り出す
 
 #### 非 Canvas ウィンドウ時の挙動
 
@@ -292,12 +287,12 @@ Rust 側は以下の JavaScript 関数を `#[wasm_bindgen(module = "env")]` 経�
 
 #### イベントキューの概要
 
-Worker は 1 つのグローバルなイベントキューを管理し、すべてのウィンドウが共有する。キーボードイベントを数値ベースで Rust タスク に提供する。
+イベントキューは Rust 側（`App`）が 1 つ持ち、タスクのすべてのウィンドウが共有する。キューにはキーイベントとタイマーイベントの 2 種類が入る。
 
-**ウィンドウのライフサイクル**:
-- `js_open_window()` 呼び出し時に新規ウィンドウを登録（eventQueue は初期化されない）
-- `js_close_window()` 呼び出し時にウィンドウを登録解除（eventQueue は変更されない）
-- Worker 初期化時に eventQueue を空の配列で初期化（全ウィンドウで共有）
+- **キーイベント**: Worker が `push_key(code)` で追加する
+- **タイマーイベント**: `api_settimer` で設定した時刻（`js_get_tick()` 基準）を過ぎたタイマーを、Rust 側がイベント取得時とキー追加時にキューへ移す。満了時刻の順に並ぶ
+  - `api_freetimer` は未満了のタイマーを取り消す。すでにキューへ入ったイベントは残る
+  - 動作中のタイマーに再度 `api_settimer` すると、満了時刻を置き換える
 
 **イベントコード形式**:
 - **文字キー**（`keydown` イベント）: ASCIIコード（0x20-0x7E）
@@ -315,107 +310,42 @@ Worker は 1 つのグローバルなイベントキューを管理し、すべ�
   | ArrowUp / ArrowDown | `0x86` / `0x87` |
   | Insert / Delete | `0x88` / `0x89` |
 
-- **修飾キー**: `modifierBitmap` をHaribote形式に変換し、イベントコードのビット8～15へ格納する。左Shift/Ctrl/Alt/Metaはビット8～11、右Shift/Ctrl/Alt/Metaはビット12～15に対応する
-- **`keyup`**: Workerへは転送されるが、イベントコードは追加しない
-- **キューが空**: Rust 呼び出し時に `-1` を返却
+- **修飾キー**: Main が持つ修飾キー状態（USB HID 形式、左右区別）をHaribote形式に変換し、イベントコードのビット8～15へ格納する。左Shift/Ctrl/Alt/Metaはビット8～11、右Shift/Ctrl/Alt/Metaはビット12～15に対応する
+- **`keyup`**: Worker へ転送しない
+- **キューが空**: `api_getkey(0)` は `-1` を返し、`api_getkey(1)` はイベントが来るまで待つ
 
 **Haribote OS API への変換**:
 - 通常の `api_getkey` はイベントコードの下位8ビットを利用する。ArrowLeft/Right/Up/Down はそれぞれ `0x34` / `0x36` / `0x38` / `0x32` へ変換し、その他の `0x80` 以上の特殊キーは無効値として扱う
 - 拡張 `api_getkeyEx` は修飾キーを含むイベントコード全体を返す
+- タイマーイベントは、どちらの API でも `api_inittimer` で設定したデータをそのまま返す
 
-#### イベントキューへのアクセス
-
-Rust タスクが `js_get_keyboard_event(window_id)` FFI 関数を呼び出すことで、対象ウィンドウのイベントキューから次のイベントコードをデキュー（取り出す）。
-
-```rust
-// Rust 側の使用例
-let event_code = js_get_keyboard_event(window_id);
-if event_code > 0 {
-    let ch = event_code as u8 as char;  // ASCIIコード → 文字
-    println!("User pressed: {}", ch);
-} else {
-    // キューが空
-}
-```
-
-**呼び出しシーケンス**:
+#### 呼び出しシーケンス
 
 1. Main スレッドが `keydown` イベントをキャッチ
-2. Canvas ウィンドウのアクティブ判定後、Worker に `keyboardEvent` メッセージ送信
-3. Worker が `handleKeyboardEvent()` で:
-   - 印字可能ASCII文字または定義済み特殊キーをイベントコードへ変換
-   - 修飾キー情報を上位ビットへエンコードし、グローバルキューに追加
-4. Rust タスクが定期的に `js_get_keyboard_event(window_id)` を呼び出し
-5. Worker が キューから次のイベントコードをデキューして返却
-6. Rust タスクがコードを処理（表示、入力処理など）
+2. Canvas ウィンドウのアクティブ判定後、イベントコードへ変換して Worker に `key` メッセージ送信
+3. Worker が `push_key(code)` を呼ぶ
+4. Rust 側が満了済みタイマーをキューへ移してから、キーイベントをキューに追加
+5. タスクが `api_getkey` を呼ぶと、Rust 側がキューから次のイベントを取り出して返す
 
-**マルチウィンドウ環境**:
-- 各ウィンドウのキー入力がすべて同じグローバルキューに入る
-- Rust タスク A が `js_get_keyboard_event(windowId1)` を呼び出し
-- Rust タスク B が `js_get_keyboard_event(windowId2)` を呼び出し
-- 両者とも同じグローバルキューから順序通りデキュー
-- `js_get_keyboard_event()` の windowId パラメータはキューを特定するために使われない（互換性のため受け付けるのみ）
+`push_key` は Worker のメッセージハンドラから呼ばれる。`step()` の実行中にメッセージハンドラは動かないため、Rust 側のキューへのアクセスが重なることはない。
 
-#### スレッドセーフティ
+## 6. 実行フロー
 
-- **イベントキュー操作**は Worker スレッド内のみで実行
-- Main スレッドからアクセスなし
-- すべてのウィンドウが同じキューを共有（ウィンドウID無関係）
-- Worker 内での Rust FFI 呼び出しから逐次アクセス
-- 並行アクセス問題なし（Worker は単一スレッド）
-
-## 6. Rust 側のコンテキスト（OsContext）
-
-**OsContext 構造体:**
-```rust
-pub struct OsContext {
-    pub title_bar_height: u32,
-}
-```
-
-**役割:**
-- Rust アプリケーション内でシステム定数や UI パラメータを保持
-- ウィンドウ作成時にレイアウト計算に使用可能
-
-**パラメータ詳細:**
-- `title_bar_height`: Main UI で定義された `TITLE_BAR_HEIGHT` 定数値（通常 32px）
-  - Worker 起動時に `startWithCommand` メッセージで Main から渡される
-  - `run_task(...)` 経由で Rust へ伝達される
-  - Rust アプリケーションがウィンドウ内容領域をレイアウト計算する際に利用可能
-  - 例：コンテンツ描画領域の Y オフセット計算時に使用
-
-**使用例:**
-```rust
-let context = OsContext { title_bar_height: 32 };
-let window = HariWindow::new(&context, "My App", Size::new(320, 152));
-// title_bar_height を参考にして、ウィンドウ内の描画領域をレイアウト
-let content_y_offset = context.title_bar_height as i32;
-```
-## 7. 実行フロー
-
-### 7.1 単一 Worker の場合
+### 6.1 タスクの起動から終了まで
 
 1. 端末でコマンドライン入力
-2. 未定義コマンドかつファイル名一致時、Worker を `startWithCommand` で起動
-3. Worker 生成、Wasm モジュールをロード
-4. wasm_bindgen でエクスポートされた `run_task(terminalWindowId, fileName, commandLine, titleBarHeight)` を呼び出す
-5. Rust はインターフェースを通じてメインスレッドへ操作要求を送信
-6. メインスレッドがウィンドウ状態更新および Canvas 描画を実施
-7. Rust 関数が終了 (panic または return)
-8. Worker は Main へ `done` または `error` メッセージを送信
-
-### 7.2 未定義コマンド実行フロー
-
-1. 端末でコマンドライン入力
-2. 定義済みコマンドに一致しない場合、先頭トークンをファイル名として探索
-3. ファイルが存在する場合、Worker を `startWithCommand` で起動
-4. Worker は起動引数を受け取り、`println(windowId, text)` でデバッグ出力
-5. Rust も `println(text)` / `print(text)` を呼べる
-6. Worker は通常の Rust(Wasm) タスク実行を継続
+2. 定義済みコマンドに一致しない場合、先頭トークンをファイル名として探索（[状態管理](./state-management.md) の 4.3 を参照）
+3. ファイルが存在する場合、Main が Worker を生成して `startWithCommand` を送る。ファイルマネージャからの起動も同じ経路を通る
+4. Worker がファイルシステムのコピーを作り、Wasm モジュールをロードする
+5. Worker が `run_task(fileName, commandLine)` を呼ぶ。Rust が起動ログ（`[rust] run_task(...)`）を出力先端末に出す
+6. Worker が `step()` を繰り返し呼ぶ。戻り値の時間だけ待ってから次を呼ぶ
+7. Rust は 3 章のインターフェースを通じて Main へ操作を依頼し、Main がウィンドウ状態の更新や Canvas 描画を行う
+8. `step()` が終了を返したら、Worker は Main へ `done` を送る。例外が起きた場合は `error` を送る
+9. Main がタスクを解放する（4.3 を参照）
 
 **複数 Worker が並行実行する場合**：
-- 各 Worker は Main から受け取ったスナップショットをベースに動作
+- 各 Worker は起動時のスナップショットと、その後の変更分をもとに動作
 - Task A が `js_write_file` で新規ファイルを作成
-- Main が永続化 → 全 Worker に `updateFileSystemSnapshot` を配信
-- Task B が その後 `js_read_file_size` でファイルを検索 → 正常に見つかる
-- ファイルの重複上書きは、Main の `fileSystem` Map で最後の write が優先
+- Main が永続化 → 全 Worker に `fileSystemChanged` を配信
+- Task B が その後 `js_read_file` でファイルを検索 → 正常に見つかる
+- ファイルの重複上書きは、Main が後から処理した write が優先

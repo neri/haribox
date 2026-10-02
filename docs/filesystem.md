@@ -116,40 +116,52 @@
     - サイズチェックが必要な場合は Main で判定し、エラー時は取り込みを中止
   
 - **Worker でのアクセス**：
-  - 起動時に Main から最新スナップショットを受け取る
-  - ファイル読み込みはスナップショット内で実施
-  - ファイル書き込みは Main へメッセージで通知
-  - Main からの `updateFileSystemSnapshot` を受信したら内部状態を最新化
-  
+  - 起動時に Main からその時点のスナップショット（全ファイルのコピー）を受け取る
+  - 以後は Main から変更分だけを `fileSystemChanged` で受け取り、手元のコピーに反映する
+  - ファイル読み込みは手元のコピーから行う
+  - ファイル書き込みは手元のコピーに反映し、Main へ `fileWritten` で通知する
+  - 手元のコピーの操作は `src/fs/taskFileSystem.ts` にまとめてある
+
+- **書き込みの成否は Worker が決める**：
+  - `js_write_file` は同期呼び出しで、Main の応答を待てない。そのため Worker が手元のコピーで成否を判定し、その結果を Rust に返す
+  - ファイル名は Main と同じ規則（`normalizeFileName`）で正規化する。正規化できない名前は Worker の時点で失敗にする
+  - 書き込みモード（update / create / upsert）も Worker が手元のコピーで判定する
+  - Main は `fileWritten` を受け取ったら、モードを再判定せずそのまま保存する。Worker が成功を返した書き込みが Main で捨てられることはない
+  - 読み込みも同じ正規化を通す。正規化で名前が変わるファイル（例: `my file.txt` → `my_file.txt`）も、書いた名前のまま読める
+
 - **複数 Worker の同期**：
   - 任意の Worker が書き込みを実施
   - Main が永続化
-  - Main が全 Worker に更新スナップショットを配信
+  - Main が全 Worker に変更分を配信する。書き込んだ Worker 自身にも配信する（下記の順序を保つため）
   - Main 起点の変更（ターミナルの `COPY` / `DEL` / `REN`、ドラッグアンドドロップ取り込み）でも、同様に全 Worker へ配信する
   - 次のアクセスで全 Worker が最新ファイルシステムを参照可能
+
+- **変更の順序**：
+  - 変更の順序は Main が決める。Main が処理した順に `fileSystemChanged` が全 Worker に届くので、各 Worker のコピーは Main と同じ状態に収束する
+  - 例: Main で `DEL X` した直後に Worker が X を書いた場合、Main は「削除 → 書き込み」の順に処理し、Worker にも「削除」「書き込み」の順で届く。書いた本人に配信しないと、Worker だけ X が消えたままになる
+  - 名前変更は「削除」と「書き込み」の 2 つの変更として 1 つのメッセージで届く
 
 ## 2. 複数 Worker ファイルシステム同期フロー
 
 ### 2.1 複数 Worker 同時実行時のファイルシステム同期
 
 - **初期化時**：
-  1. Worker A 起動 → Main から最新スナップショット (v0) を受け取る
-  2. Worker B 起動 → Main から最新スナップショット (v0) を受け取る
+  1. Worker A 起動 → Main からスナップショットを受け取る
+  2. Worker B 起動 → Main からスナップショットを受け取る
 
 - **ファイル書き込み時**：
-  1. Worker A が `js_write_file("file.txt", data)` を呼び出す
-  2. Main がファイル書き込みメッセージを受け取る
-  3. Main が fileSystem を更新
-  4. Main が `persistFileSystem()` で localStorage へ永続化
-  5. Main が全アクティブ Worker（A, B）に `updateFileSystemSnapshot(v1)` メッセージを配信
-  6. Worker B が スナップショット更新メッセージを受け取る
-  7. Worker B が内部の fileSystem を v1 へ更新
-  8. Worker B が次に `js_read_file_size("file.txt")` を呼び出す
-  9. Worker B は Worker A の書き込み内容を正常に読み込める ✓
+  1. Worker A が `js_write_file("file.txt", data, mode)` を呼び出す
+  2. Worker A が名前を正規化し、手元のコピーでモードを判定して書き込む。Rust には成否を返す
+  3. Worker A が Main に `fileWritten` を送る
+  4. Main が fileSystem を更新し、`persistFileSystem()` で localStorage へ永続化
+  5. Main が全アクティブ Worker（A, B）に `fileSystemChanged`（`file.txt` の書き込み 1 件）を配信
+  6. Worker B が変更を手元のコピーに反映する
+  7. Worker B が次に `js_read_file("file.txt")` を呼び出す
+  8. Worker B は Worker A の書き込み内容を正常に読み込める ✓
 
 **複数 Worker が並行実行する場合**：
-- 各 Worker は Main から受け取ったスナップショットをベースに動作
+- 各 Worker は起動時のスナップショットと、その後の変更分をもとに動作
 - Task A が `js_write_file` で新規ファイルを作成
-- Main が永続化 → 全 Worker に `updateFileSystemSnapshot` を配信
-- Task B が その後 `js_read_file_size` でファイルを検索 → 正常に見つかる
-- ファイルの重複上書きは、Main の `fileSystem` Map で最後の write が優先
+- Main が永続化 → 全 Worker に `fileSystemChanged` を配信
+- Task B が その後 `js_read_file` でファイルを検索 → 正常に見つかる
+- ファイルの重複上書きは、Main が後から処理した write が優先
