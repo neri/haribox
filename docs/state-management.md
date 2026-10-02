@@ -44,15 +44,18 @@ type WindowGroupInfo = {
   isExpanded: boolean;    // グループのドロップダウン展開状態
 };
 
-type AppState = {
+// ウィンドウ管理の状態 (src/wm/state.ts)
+type WindowManagerState = {
   windows: WindowModel[];
   nextZIndex: number;
-  env: EnvironmentVariables;
-  isMenuOpen: boolean;
-  defaultTerminalWindowId: WindowId | null;
   activeWindowId: WindowId | null;
   windowGroups: WindowGroupInfo[];  // ウィンドウグループ化情報（タスクバー表示用）
 };
+
+// 以下の状態は、それぞれを所有するモジュールが保持する
+//   env: EnvironmentVariables                      … src/task/taskRunner.ts
+//   isMenuOpen: boolean                            … src/shell/taskbarWidgets.ts
+//   defaultTerminalWindowId: WindowId | null       … src/apps/terminal/state.ts
 
 // アプリID定数
 const APP_IDS = {
@@ -93,7 +96,7 @@ const APP_IDS = {
 
 ### 1.5 ターミナル履歴管理
 
-実装でのグローバル状態（AppState に含まれない付帯情報）:
+実装でのグローバル状態（`src/apps/terminal/state.ts` が保持する付帯情報）:
 
 - `terminalHistoryByWindow: Map<WindowId, string[]>`
   - 各ターミナルウィンドウの過去実行コマンド履歴
@@ -146,7 +149,6 @@ const APP_IDS = {
     - **カスケード配置**で左上(40, 40)から開始
     - 新規ウィンドウ作成時に内部カウンタを増やし、毎回オフセット（24px）を加算
     - `x = 40 + (nextTerminalSpawnIndex * 24)`、`y = 40 + (nextTerminalSpawnIndex * 24)`
-    - デスクトップ外へはみ出す場合は `clampWindowToDesktop()` でデスクトップ内へ収納
   - Rust/Canvas ウィンドウの初期座標:
     - ウィンドウサイズから計算してデスクトップ中央に配置
   - `zIndex = nextZIndex` で追加後、`nextZIndex` をインクリメント
@@ -358,7 +360,8 @@ const APP_IDS = {
   ```
   function groupWindowsByKind(windows: WindowModel[]): WindowGroupInfo[] {
     // 1. canvas タイプは個別表示（グループ化しない）
-    // 2. terminal, filemanager, about, textviewer は同じ種類ごとにグループ化
+    // 2. terminal, filemanager, textviewer は同じ種類ごとにグループ化
+    //    （システムモーダルである about, systemmodal は、呼び出し側で対象から除外する）
     // 3. 各グループの windowIds は作成順（zIndex 順）に保持
     // 4. 新規グループの isExpanded は初期値 false
     // 5. グループが空になった場合は削除
@@ -368,7 +371,6 @@ const APP_IDS = {
 **アイコン対応表**:
 - `terminal` → `terminal-2.svg`
 - `filemanager` → `folder.svg`
-- `about` → `category.svg`
 - `textviewer` → `file-text.svg`
 - `canvas` → `app-window.svg`（タスク定義に応じて変更可能）
 
@@ -379,9 +381,11 @@ const APP_IDS = {
 
 ### 5.3 実装対象ファイル
 
-- `src/main.ts`
+- `src/wm/grouping.ts`
   - ウィンドウグループ化ロジック実装
+- `src/wm/state.ts`
   - グループ化情報の状態管理
+- `src/shell/taskbar.ts`
   - タスクバーボタンのイベントハンドラー（クリック・ホバー）
   - ドロップダウンメニュー表示/非表示制御
 
@@ -421,9 +425,9 @@ const APP_IDS = {
 
 ### 5.5 実装の流れ
 
-1. `WindowGroupInfo` 型定義を `src/main.ts` に追加
+1. `WindowGroupInfo` 型定義を `src/wm/state.ts` に追加
 2. `groupWindowsByKind()` 関数を実装
-3. `AppState` に `windowGroups` フィールドを追加し、初期化時に計算
+3. ウィンドウ管理の状態に `windowGroups` フィールドを追加し、初期化時に計算
 4. ウィンドウ操作（作成・削除）時に `windowGroups` 再計算ロジックを組み込み
 5. タスクバー HTML マークアップを拡張（ハンバーガーメニューと時計の間にボタン領域を追加）
 6. タスクバーボタンのレンダリング関数を実装
@@ -443,9 +447,27 @@ const APP_IDS = {
 
 ### 6.1 Main スレッドの状態管理
 
-- AppState は単一インスタンスで、全ウィンドウの状態を一元管理
-- ウィンドウの作成・削除・移動などの操作は、AppState を経由して行われる
+- ウィンドウの状態は `src/wm/state.ts` の単一インスタンスで一元管理
+- ウィンドウの作成・削除・移動などの操作は、`src/wm/windowManager.ts` を経由して行われる
 - 状態変更時は renderWindows() が自動的に呼び出され、画面が更新される
+- ウィンドウ種別ごとの描画・フォーカス・後始末は、各アプリが `src/wm/registry.ts` に登録する。ウィンドウ管理側はアプリを import しない
+- ウィンドウごとの付帯情報（ターミナル出力、Canvas のピクセルバッファ、選択位置など）は、その種別のアプリモジュールが保持する
+
+**ソース構成** (`src/`):
+
+| パス | 役割 |
+|---|---|
+| `main.ts` | 起動処理のみ（初期化の呼び出しと初期ウィンドウの生成） |
+| `constants.ts`, `protocol.ts` | 定数、Main ⇄ Worker のメッセージ型 |
+| `fs/` | ファイル名の正規化（`fileName.ts`）、ファイルシステム本体・永続化・文字コード判定（`fileSystem.ts`）、拡張子の関連付けと一覧の選択位置（`fileAssoc.ts`） |
+| `audio/` | AudioContext とオシレーター、音量の保存 |
+| `shell/` | デスクトップとタスクバーの DOM（`dom.ts`）、時計・スタートメニュー・音量 UI（`taskbarWidgets.ts`）、タスクバーボタン（`taskbar.ts`） |
+| `wm/` | ウィンドウの型と状態（`state.ts`）、操作（`windowManager.ts`）、描画とドラッグ（`render.ts`）、グループ化（`grouping.ts`）、種別レジストリ（`registry.ts`） |
+| `apps/` | ウィンドウ種別ごとの実装（terminal, canvas, fileManager, about, onboarding, textViewer）と、ドロップ取り込み + システムモーダル（`dropImport.ts`） |
+| `task/` | Worker の起動・追跡・後始末、Worker からのメッセージ処理、タスクに渡す環境変数 |
+| `input/` | 修飾キーの状態、Canvas へのキー転送 |
+
+`fs/` と `audio/` は DOM に触れない。純粋なロジックには `*.test.ts`（vitest）を付ける。
 
 ### 6.2 Worker との通信プロトコル
 
@@ -460,6 +482,15 @@ const APP_IDS = {
 - 複数 Worker が同時に実行される場合、最後の変更が優先される
 
 ## 7. System Modal State Management
+
+### 7.0 システムモーダルという表示形式
+
+- システムモーダルかどうかは、ウィンドウ種別の定義（`src/wm/registry.ts` の `WindowKindDefinition.modal`）で指定する。現在は `systemmodal`（ファイル取り込み）と `about` が該当する
+- 描画（`src/wm/render.ts`）は種別名ではなくこの指定を見て、オーバーレイ・タイトルバーなしの枠・タスクバーからの除外を適用する
+- 重なり順: モーダルの枠は `WindowModel.zIndex` に固定の基準値を加えた z-index で描画し、通常のウィンドウより常に前面にする。モーダル同士は `zIndex` の大きい方（後から開いた、または前面化したもの）が前面になる
+- オーバーレイは最前面のモーダルのすぐ背後に 1 枚だけ置く
+
+以下 7.1 以降は、ファイル取り込み用モーダル（`systemmodal`）固有の状態である。
 
 ### 7.1 System Modal の状態変数
 
@@ -507,7 +538,7 @@ window.addEventListener('dragover', (event) => {
   
   // Modal が未作成またはクローズされていれば作成
   if (!modalCreated || !systemModalWindowId || !findWindowById(systemModalWindowId)) {
-    createSystemModalWindow('import');
+    createSystemModalWindow();
     modalCreated = true;
   }
   

@@ -518,6 +518,18 @@ body,
   overflow: hidden;
 }
 
+/* About is shown as a system modal: no title bar, close button in the top-right corner */
+.system-modal-frame .about-panel {
+  height: 100%;
+  padding: 24px;
+  gap: 12px;
+}
+
+.system-modal-frame .about-info {
+  /* Keep clear of the close button */
+  margin-right: 32px;
+}
+
 .about-info {
   padding: 8px;
   background: #f5f5f5;
@@ -1045,6 +1057,14 @@ body,
 .system-modal-message-complete {
   margin: 0 0 24px 0;
   font-size: 15px;
+}
+
+/* Buttons in a system modal are rounder than in normal windows (2px), to match the rounded frame */
+.system-modal-frame .system-modal-button,
+.system-modal-frame .system-modal-close-button,
+.system-modal-frame .window-primary-button,
+.system-modal-frame .window-secondary-button {
+  border-radius: 8px;
 }
 
 .system-modal-button-container {

@@ -11,6 +11,7 @@ help:
 	@echo "  make full-build  - Build rust wasm, copy artifacts, then build web app"
 	@echo "  make wasm        - Build rust wasm and copy it into src/public"
 	@echo "  make build-web   - Run pnpm build"
+	@echo "  make server      - Run the server"
 
 clean: clean-web clean-rust
 	@rm -f $(WASM_DST_SRC)
@@ -33,6 +34,7 @@ full-build: wasm build-web
 
 test:
 	cargo test --manifest-path $(RUST_DIR)/Cargo.toml
+	pnpm test
 
 update:
 	cargo update --manifest-path $(RUST_DIR)/Cargo.toml

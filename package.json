@@ -8,11 +8,13 @@
     "generate:initial-fs": "node scripts/generate-initial-fs.mjs",
     "prebuild": "make wasm && npm run generate:initial-fs",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "npm run generate:initial-fs && vitest run"
   },
   "devDependencies": {
     "typescript": "latest",
-    "vite": "latest"
+    "vite": "latest",
+    "vitest": "latest"
   },
   "dependencies": {
     "encoding-japanese": "latest",

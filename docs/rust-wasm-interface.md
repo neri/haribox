@@ -198,7 +198,7 @@ Rust 側は以下の JavaScript 関数を `#[wasm_bindgen(module = "env")]` 経�
   - パラメータ:
     - `filename`: 書き込みされたファイル名
     - `data`: 書き込み内容の `ArrayBuffer`
-    - `mode`: `update` / `create` / `upsert`
+    - `mode`: `js_write_file` の `mode` と同じ数値（`0`: update / `1`: create / `2`: upsert）
   - Main の処理:
     - `mode` を検証してファイルシステムを更新し、localStorage へ永続化
     - 複数 Worker 同時実行時は、全 Worker に `updateFileSystemSnapshot` メッセージで配信
